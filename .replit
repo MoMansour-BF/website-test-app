@@ -1,0 +1,6 @@
+{
+  "run": "npm run dev",
+  "entrypoint": "app/page.tsx",
+  "hidden": [".next", "node_modules", ".git"],
+  "modules": ["nodejs-20"]
+}
