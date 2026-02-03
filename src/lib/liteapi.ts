@@ -1,9 +1,4 @@
-const LITEAPI_API_KEY = process.env.LITEAPI_API_KEY;
-
-if (!LITEAPI_API_KEY) {
-  throw new Error("LITEAPI_API_KEY is not set in environment");
-}
-
+// Validated inside request function
 const API_BASE = "https://api.liteapi.travel/v3.0";
 const BOOK_BASE = "https://book.liteapi.travel/v3.0";
 
@@ -27,6 +22,11 @@ async function request<T>(
     options.searchParams.forEach((value, key) => {
       url.searchParams.set(key, value);
     });
+  }
+
+  const LITEAPI_API_KEY = process.env.LITEAPI_API_KEY;
+  if (!LITEAPI_API_KEY) {
+    throw new Error("LITEAPI_API_KEY is not set in environment variables");
   }
 
   const res = await fetch(url.toString(), {
