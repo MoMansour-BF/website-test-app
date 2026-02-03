@@ -69,6 +69,8 @@ export default function ConfirmationPage() {
       return;
     }
 
+    const guestData = guest;
+
     async function run() {
       try {
         setLoading(true);
@@ -78,7 +80,7 @@ export default function ConfirmationPage() {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             prebookId,
-            holder: guest,
+            holder: guestData,
             payment: {
               method: "TRANSACTION_ID",
               transactionId
@@ -86,9 +88,9 @@ export default function ConfirmationPage() {
             guests: [
               {
                 occupancyNumber: 1,
-                firstName: guest.firstName,
-                lastName: guest.lastName,
-                email: guest.email
+                firstName: guestData.firstName,
+                lastName: guestData.lastName,
+                email: guestData.email
               }
             ]
           })
@@ -209,11 +211,11 @@ export default function ConfirmationPage() {
                 </p>
                 <p className="text-slate-300">
                   {policy.refundableTag === "NRF" ||
-                  policy.refundableTag === "NRFN"
+                    policy.refundableTag === "NRFN"
                     ? "This booking is non-refundable."
                     : cancelInfo
-                    ? `Free cancellation until ${cancelInfo}.`
-                    : "See your confirmation email for full cancellation terms."}
+                      ? `Free cancellation until ${cancelInfo}.`
+                      : "See your confirmation email for full cancellation terms."}
                 </p>
               </div>
             )}
