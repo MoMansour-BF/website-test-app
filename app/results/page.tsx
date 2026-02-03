@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { FormEvent, useEffect, useMemo, useState, Suspense } from "react";
+import { FormEvent, useEffect, useMemo, useState, Suspense, useRef } from "react";
 
 const INITIAL_BATCH = 24;
 const BATCH_SIZE = 24;
@@ -38,6 +38,12 @@ interface SearchResponse {
   pricesByHotelId: Record<string, PriceInfo>;
 }
 
+interface PlaceSuggestion {
+  placeId: string;
+  displayName: string;
+  formattedAddress?: string;
+}
+
 function ResultsLoading() {
   return (
     <div className="flex-1 flex flex-col px-4 pb-6 pt-4 gap-4">
@@ -63,12 +69,12 @@ function ResultsLoading() {
 function ResultsContent() {
   const searchParams = useSearchParams();
   const mode = (searchParams.get("mode") as "place" | "vibe") ?? "place";
-  const placeId = searchParams.get("placeId");
-  const placeName = searchParams.get("placeName");
-  const aiSearch = searchParams.get("aiSearch");
-  const checkin = searchParams.get("checkin") ?? "";
-  const checkout = searchParams.get("checkout") ?? "";
-  const adults = Number(searchParams.get("adults") ?? "2");
+  const placeIdParam = searchParams.get("placeId");
+  const placeNameParam = searchParams.get("placeName");
+  const aiSearchParam = searchParams.get("aiSearch");
+  const checkinParam = searchParams.get("checkin") ?? "";
+  const checkoutParam = searchParams.get("checkout") ?? "";
+  const adultsParam = Number(searchParams.get("adults") ?? "2");
 
   const router = useRouter();
   const [data, setData] = useState<SearchResponse | null>(null);
@@ -77,19 +83,43 @@ function ResultsContent() {
   const [sortOrder, setSortOrder] = useState<SortOption>("recommended");
   const [visibleCount, setVisibleCount] = useState(INITIAL_BATCH);
   const [filterPanelOpen, setFilterPanelOpen] = useState(false);
+
+  // Search form state
   const [globalSearchQuery, setGlobalSearchQuery] = useState("");
-  const [globalSearchCheckin, setGlobalSearchCheckin] = useState(checkin);
-  const [globalSearchCheckout, setGlobalSearchCheckout] = useState(checkout);
-  const [globalSearchAdults, setGlobalSearchAdults] = useState(adults);
+  const [globalSearchCheckin, setGlobalSearchCheckin] = useState(checkinParam);
+  const [globalSearchCheckout, setGlobalSearchCheckout] = useState(checkoutParam);
+  const [globalSearchAdults, setGlobalSearchAdults] = useState(adultsParam);
 
+  // Autocomplete state
+  const [suggestions, setSuggestions] = useState<PlaceSuggestion[]>([]);
+  const [loadingPlaces, setLoadingPlaces] = useState(false);
+  const [placesError, setPlacesError] = useState<string | null>(null);
+  const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
+  const [selectedPlaceName, setSelectedPlaceName] = useState<string | null>(null);
+
+  // Sync state with URL params on load/change
   useEffect(() => {
-    setGlobalSearchCheckin(checkin);
-    setGlobalSearchCheckout(checkout);
-    setGlobalSearchAdults(adults);
-    setGlobalSearchQuery(mode === "place" ? (placeName ?? "") : (aiSearch ?? ""));
-    setVisibleCount(INITIAL_BATCH);
-  }, [mode, placeName, aiSearch, checkin, checkout, adults]);
+    setGlobalSearchCheckin(checkinParam);
+    setGlobalSearchCheckout(checkoutParam);
+    setGlobalSearchAdults(adultsParam);
 
+    // Initialize query logic
+    const initialQuery = mode === "place" ? (placeNameParam ?? "") : (aiSearchParam ?? "");
+    setGlobalSearchQuery(initialQuery);
+
+    // If it's a place mode, set the selected place ID so we know it's "locked in"
+    if (mode === "place" && placeIdParam) {
+      setSelectedPlaceId(placeIdParam);
+      setSelectedPlaceName(placeNameParam);
+    } else {
+      setSelectedPlaceId(null);
+      setSelectedPlaceName(null);
+    }
+
+    setVisibleCount(INITIAL_BATCH);
+  }, [mode, placeIdParam, placeNameParam, aiSearchParam, checkinParam, checkoutParam, adultsParam]);
+
+  // Fetch results
   useEffect(() => {
     async function run() {
       try {
@@ -100,11 +130,11 @@ function ResultsContent() {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             mode,
-            placeId,
-            aiSearch,
-            checkin,
-            checkout,
-            adults
+            placeId: placeIdParam,
+            aiSearch: aiSearchParam,
+            checkin: checkinParam,
+            checkout: checkoutParam,
+            adults: adultsParam
           })
         });
         const json = await res.json();
@@ -120,7 +150,58 @@ function ResultsContent() {
     }
 
     run();
-  }, [mode, placeId, aiSearch, checkin, checkout, adults]);
+  }, [mode, placeIdParam, aiSearchParam, checkinParam, checkoutParam, adultsParam]);
+
+  // Places autocomplete effect
+  useEffect(() => {
+    // Only search if user is typing and hasn't just selected a place (implied by query matching name)
+    // Actually, simpler: if query changes, we search, unless it matches the selected place name perfectly?
+    // Let's just search always on query change if query is long enough.
+
+    if (!globalSearchQuery || globalSearchQuery.trim().length < 2) {
+      setSuggestions([]);
+      setPlacesError(null);
+      return;
+    }
+
+    // Don't search if the query is exactly what we just selected
+    if (selectedPlaceName && globalSearchQuery === selectedPlaceName) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(async () => {
+      try {
+        setLoadingPlaces(true);
+        setPlacesError(null);
+        const res = await fetch(
+          `/api/places?q=${encodeURIComponent(globalSearchQuery.trim())}`,
+          { signal: controller.signal }
+        );
+        if (!res.ok) throw new Error("Failed to load places");
+
+        const json = await res.json();
+        const data = (json?.data ?? []) as any[];
+        setSuggestions(
+          data.map((p) => ({
+            placeId: p.placeId,
+            displayName: p.displayName,
+            formattedAddress: p.formattedAddress
+          }))
+        );
+      } catch (err: any) {
+        if (err.name === "AbortError") return;
+        setPlacesError("Could not load destinations");
+      } finally {
+        setLoadingPlaces(false);
+      }
+    }, 300);
+
+    return () => {
+      controller.abort();
+      clearTimeout(timeout);
+    };
+  }, [globalSearchQuery, selectedPlaceName]);
 
   const allHotels: LiteAPIHotel[] =
     data?.raw?.hotels ??
@@ -157,24 +238,66 @@ function ResultsContent() {
   const hasMore = visibleCount < sortedHotels.length;
 
   const locationLabel =
-    mode === "place" ? (placeName || "this location") : "your search";
+    mode === "place" ? (placeNameParam || "this location") : "your search";
 
   const title =
     mode === "place"
-      ? placeName || "Destination stays"
+      ? placeNameParam || "Destination stays"
       : "Matches for your vibe";
+
+  const handleSelectPlace = (place: PlaceSuggestion) => {
+    setSelectedPlaceId(place.placeId);
+    setSelectedPlaceName(place.displayName);
+    setGlobalSearchQuery(place.displayName);
+    setSuggestions([]);
+    setPlacesError(null);
+  };
 
   const handleGlobalSearch = (e: FormEvent) => {
     e.preventDefault();
     if (!globalSearchQuery.trim()) return;
+
+    // If query was cleared, reset selected place
+    if (!globalSearchQuery) {
+      setSelectedPlaceId(null);
+      setSelectedPlaceName(null);
+    }
+
     const params = new URLSearchParams();
-    // Default to vibe mode (query-based search) - will be interpreted by backend
-    params.set("mode", "vibe");
-    params.set("aiSearch", globalSearchQuery.trim());
+
+    // Check if we have a selected place that matches the current query text
+    // (fuzzy check: if query contains the place name or vice versa, or just relying on selectedPlaceId if set)
+    // Strongest signal: user clicked a suggestion, so selectedPlaceId is set.
+    // However, if they typed something else afterwards, we should clear it. 
+    // Effect above doesn't clear ID on text change, so we effectively "stick" to the ID unless they clear text?
+    // Let's rely on: if selectedPlaceId is set AND query is roughly similar (or we just trust the ID if they didn't clear it).
+    // Better: if they type something new, we should probably reset ID.
+    // Re-implementing simplified logic: If selectedPlaceId is present, we allow it.
+
+    if (selectedPlaceId) {
+      params.set("mode", "place");
+      params.set("placeId", selectedPlaceId);
+      params.set("placeName", selectedPlaceName || globalSearchQuery);
+    } else {
+      // Fallback to vibe/text search
+      params.set("mode", "vibe");
+      params.set("aiSearch", globalSearchQuery.trim());
+    }
+
     params.set("checkin", globalSearchCheckin);
     params.set("checkout", globalSearchCheckout);
     params.set("adults", String(globalSearchAdults));
     router.push(`/results?${params.toString()}`);
+    setSuggestions([]); // close dropdown
+  };
+
+  // Clear selected place if user changes text significantly (basic heuristic)
+  const onInputChange = (val: string) => {
+    setGlobalSearchQuery(val);
+    if (selectedPlaceName && val !== selectedPlaceName) {
+      setSelectedPlaceId(null);
+      setSelectedPlaceName(null);
+    }
   };
 
   return (
@@ -191,54 +314,95 @@ function ResultsContent() {
             {title}
           </h1>
           <p className="text-[11px] text-slate-400">
-            {checkin} → {checkout} · {adults}{" "}
-            {adults === 1 ? "guest" : "guests"}
+            {checkinParam} → {checkoutParam} · {adultsParam}{" "}
+            {adultsParam === 1 ? "guest" : "guests"}
           </p>
         </div>
       </header>
 
-      <form
-        onSubmit={handleGlobalSearch}
-        className="rounded-xl border border-slate-800 bg-slate-900/80 p-3 space-y-2"
-      >
-        <p className="text-[11px] font-medium text-slate-400 uppercase tracking-wide">
-          Search by destination
-        </p>
-        <input
-          type="text"
-          value={globalSearchQuery}
-          onChange={(e) => setGlobalSearchQuery(e.target.value)}
-          placeholder="Search destination (e.g. Paris, New York, London)"
-          className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-50 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500"
-        />
-        <div className="flex gap-2 flex-wrap">
-          <input
-            type="date"
-            value={globalSearchCheckin}
-            onChange={(e) => setGlobalSearchCheckin(e.target.value)}
-            className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-50"
-          />
-          <input
-            type="date"
-            value={globalSearchCheckout}
-            onChange={(e) => setGlobalSearchCheckout(e.target.value)}
-            className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-50"
-          />
-          <input
-            type="number"
-            min={1}
-            value={globalSearchAdults}
-            onChange={(e) => setGlobalSearchAdults(Number(e.target.value) || 1)}
-            className="w-14 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-50"
-          />
-          <button
-            type="submit"
-            className="rounded-lg bg-emerald-500 text-slate-900 text-xs font-semibold px-3 py-1.5"
-          >
-            Search
-          </button>
-        </div>
-      </form>
+      <div className="rounded-xl border border-slate-800 bg-slate-900/80 p-3 space-y-2 relative z-20">
+        <form onSubmit={handleGlobalSearch} className="space-y-2">
+          <p className="text-[11px] font-medium text-slate-400 uppercase tracking-wide">
+            Search by destination
+          </p>
+          <div className="relative">
+            <input
+              type="text"
+              value={globalSearchQuery}
+              onChange={(e) => onInputChange(e.target.value)}
+              placeholder="Search destination (e.g. Paris, New York, London)"
+              className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-50 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              autoComplete="off"
+            />
+
+            {/* Autocomplete Dropdown */}
+            {(suggestions.length > 0 || loadingPlaces || placesError) && (
+              <div className="absolute top-full left-0 right-0 mt-1 rounded-xl border border-slate-700 bg-slate-900/95 backdrop-blur shadow-xl overflow-hidden max-h-52 overflow-y-auto">
+                {loadingPlaces && (
+                  <div className="p-3 text-[11px] text-slate-500">
+                    Searching destinations…
+                  </div>
+                )}
+                {placesError && (
+                  <div className="p-3 text-[11px] text-red-400">
+                    {placesError}
+                  </div>
+                )}
+                {suggestions.length > 0 && (
+                  <ul className="divide-y divide-slate-800/50">
+                    {suggestions.map((place) => (
+                      <li key={place.placeId}>
+                        <button
+                          type="button"
+                          onClick={() => handleSelectPlace(place)}
+                          className="w-full text-left px-3 py-2 text-xs text-slate-50 hover:bg-slate-800/80 hover:text-emerald-400 transition-colors"
+                        >
+                          <div className="font-medium">
+                            {place.displayName}
+                          </div>
+                          {place.formattedAddress && (
+                            <div className="text-[11px] text-slate-400 truncate">
+                              {place.formattedAddress}
+                            </div>
+                          )}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="flex gap-2 flex-wrap">
+            <input
+              type="date"
+              value={globalSearchCheckin}
+              onChange={(e) => setGlobalSearchCheckin(e.target.value)}
+              className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-50 [color-scheme:dark]"
+            />
+            <input
+              type="date"
+              value={globalSearchCheckout}
+              onChange={(e) => setGlobalSearchCheckout(e.target.value)}
+              className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-50 [color-scheme:dark]"
+            />
+            <input
+              type="number"
+              min={1}
+              value={globalSearchAdults}
+              onChange={(e) => setGlobalSearchAdults(Number(e.target.value) || 1)}
+              className="w-14 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-50"
+            />
+            <button
+              type="submit"
+              className="rounded-lg bg-emerald-500 text-slate-900 text-xs font-semibold px-3 py-1.5"
+            >
+              Search
+            </button>
+          </div>
+        </form>
+      </div>
 
       {!loading && !error && allHotels.length > 0 && (
         <section className="sticky top-0 z-10 -mx-4 px-4 py-2 bg-slate-950/95 backdrop-blur border-b border-slate-800 space-y-2">
@@ -269,7 +433,7 @@ function ResultsContent() {
 
       {filterPanelOpen && (
         <div
-          className="fixed inset-0 z-20 bg-slate-950/80 flex items-end sm:items-center justify-center"
+          className="fixed inset-0 z-[50] bg-slate-950/80 flex items-end sm:items-center justify-center"
           onClick={() => setFilterPanelOpen(false)}
         >
           <div
@@ -310,12 +474,12 @@ function ResultsContent() {
             const price = data?.pricesByHotelId[hotel.id];
             const hrefParams = new URLSearchParams();
             if (mode) hrefParams.set("mode", mode);
-            if (placeId) hrefParams.set("placeId", placeId);
-            if (placeName) hrefParams.set("placeName", placeName);
-            if (aiSearch) hrefParams.set("aiSearch", aiSearch);
-            hrefParams.set("checkin", checkin);
-            hrefParams.set("checkout", checkout);
-            hrefParams.set("adults", String(adults));
+            if (placeIdParam) hrefParams.set("placeId", placeIdParam);
+            if (placeNameParam) hrefParams.set("placeName", placeNameParam);
+            if (aiSearchParam) hrefParams.set("aiSearch", aiSearchParam);
+            hrefParams.set("checkin", checkinParam);
+            hrefParams.set("checkout", checkoutParam);
+            hrefParams.set("adults", String(adultsParam));
             const hrefParamsStr = hrefParams.toString();
 
             return (
