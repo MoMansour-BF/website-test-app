@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState, Suspense } from "react";
 
 const INITIAL_BATCH = 24;
 const BATCH_SIZE = 24;
@@ -38,7 +38,29 @@ interface SearchResponse {
   pricesByHotelId: Record<string, PriceInfo>;
 }
 
-export default function ResultsPage() {
+function ResultsLoading() {
+  return (
+    <div className="flex-1 flex flex-col px-4 pb-6 pt-4 gap-4">
+      <div className="space-y-3">
+        {Array.from({ length: 3 }).map((_, idx) => (
+          <div
+            key={idx}
+            className="rounded-2xl border border-slate-800 bg-slate-900/70 p-3 flex gap-3 animate-pulse"
+          >
+            <div className="w-24 h-24 rounded-xl bg-slate-800" />
+            <div className="flex-1 space-y-2">
+              <div className="h-4 bg-slate-800 rounded" />
+              <div className="h-3 bg-slate-800 rounded w-2/3" />
+              <div className="h-3 bg-slate-800 rounded w-1/3" />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ResultsContent() {
   const searchParams = useSearchParams();
   const mode = (searchParams.get("mode") as "place" | "vibe") ?? "place";
   const placeId = searchParams.get("placeId");
@@ -59,6 +81,7 @@ export default function ResultsPage() {
   const [globalSearchCheckin, setGlobalSearchCheckin] = useState(checkin);
   const [globalSearchCheckout, setGlobalSearchCheckout] = useState(checkout);
   const [globalSearchAdults, setGlobalSearchAdults] = useState(adults);
+
   useEffect(() => {
     setGlobalSearchCheckin(checkin);
     setGlobalSearchCheckout(checkout);
@@ -266,23 +289,7 @@ export default function ResultsPage() {
         </div>
       )}
 
-      {loading && (
-        <div className="space-y-3">
-          {Array.from({ length: 3 }).map((_, idx) => (
-            <div
-              key={idx}
-              className="rounded-2xl border border-slate-800 bg-slate-900/70 p-3 flex gap-3 animate-pulse"
-            >
-              <div className="w-24 h-24 rounded-xl bg-slate-800" />
-              <div className="flex-1 space-y-2">
-                <div className="h-4 bg-slate-800 rounded" />
-                <div className="h-3 bg-slate-800 rounded w-2/3" />
-                <div className="h-3 bg-slate-800 rounded w-1/3" />
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      {loading && <ResultsLoading />}
 
       {!loading && error && (
         <div className="mt-4 rounded-xl border border-red-500/40 bg-red-950/40 px-3 py-2 text-xs text-red-200">
@@ -421,3 +428,10 @@ export default function ResultsPage() {
   );
 }
 
+export default function ResultsPage() {
+  return (
+    <Suspense fallback={<ResultsLoading />}>
+      <ResultsContent />
+    </Suspense>
+  );
+}

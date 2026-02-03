@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useRef, useState, Suspense } from "react";
 
 interface PrebookPayload {
   data: {
@@ -50,7 +50,17 @@ declare global {
 
 const GUEST_STORAGE_KEY = "liteapi_guest_details";
 
-export default function CheckoutPage() {
+function CheckoutLoading() {
+  return (
+    <div className="flex-1 flex flex-col px-4 pb-6 pt-4 gap-4">
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 text-sm text-slate-300 animate-pulse">
+        Checking availability and locking in your price…
+      </div>
+    </div>
+  );
+}
+
+function CheckoutContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -223,7 +233,7 @@ export default function CheckoutPage() {
     }).toString();
 
     const liteAPIConfig = {
-      publicKey: process.env.NEXT_PUBLIC_LITEAPI_ENV || "sandbox",
+      publicKey: process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY || "sandbox",
       secretKey,
       returnUrl: `${origin}/confirmation?${retParams}`,
       targetElement: "#payment-element",
@@ -526,3 +536,10 @@ export default function CheckoutPage() {
   );
 }
 
+export default function CheckoutPage() {
+  return (
+    <Suspense fallback={<CheckoutLoading />}>
+      <CheckoutContent />
+    </Suspense>
+  );
+}

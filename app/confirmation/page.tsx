@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, Suspense } from "react";
 
 interface GuestDetails {
   firstName: string;
@@ -32,7 +32,22 @@ interface BookingResponse {
 
 const GUEST_STORAGE_KEY = "liteapi_guest_details";
 
-export default function ConfirmationPage() {
+function ConfirmationLoading() {
+  return (
+    <div className="flex-1 flex flex-col px-4 pb-6 pt-6 gap-4">
+      <div className="space-y-1">
+        <div className="h-6 w-48 bg-slate-800 rounded animate-pulse" />
+        <div className="h-4 w-64 bg-slate-800 rounded animate-pulse" />
+      </div>
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 text-sm text-slate-300 animate-pulse">
+        We are confirming your reservation with the hotel. This can
+        take up to 10 seconds…
+      </div>
+    </div>
+  );
+}
+
+function ConfirmationContent() {
   const searchParams = useSearchParams();
   const prebookId = searchParams.get("prebookId") ?? "";
   const transactionId = searchParams.get("transactionId") ?? "";
@@ -245,3 +260,10 @@ export default function ConfirmationPage() {
   );
 }
 
+export default function ConfirmationPage() {
+  return (
+    <Suspense fallback={<ConfirmationLoading />}>
+      <ConfirmationContent />
+    </Suspense>
+  );
+}
