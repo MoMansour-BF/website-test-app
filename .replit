@@ -1,3 +1,3 @@
-run = "npm run dev"
+run = "npm run build && npm run start"
 entrypoint = "app/page.tsx"
 hidden = [".next", "node_modules", ".git"]
