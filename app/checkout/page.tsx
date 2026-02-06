@@ -1,13 +1,16 @@
 "use client";
 
+import { useLocaleCurrency } from "@/context/LocaleCurrencyContext";
+import { parseOccupanciesParam, totalGuests } from "@/lib/occupancy";
 import { useRouter, useSearchParams } from "next/navigation";
-import { FormEvent, useEffect, useRef, useState, Suspense } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState, Suspense } from "react";
 
 interface PrebookPayload {
   data: {
     prebookId: string;
     offerId: string;
     hotelId: string;
+    /** Total to charge (source of truth per PRICING_AND_CALCULATIONS). */
     price: number;
     currency: string;
     transactionId: string;
@@ -18,8 +21,10 @@ interface PrebookPayload {
         boardName?: string;
         retailRate: {
           total: { amount: number; currency: string }[];
-          taxesAndFees?: { included?: boolean; amount?: number }[];
+          taxesAndFees?: { included?: boolean; amount?: number; currency?: string }[];
         };
+        /** Commission (seller margin) for this rate; included in retailRate.total. */
+        commission?: { amount?: number; currency?: string }[];
         cancellationPolicies?: {
           refundableTag?: string;
           cancelPolicyInfos?: { cancelTime?: string }[];
@@ -34,6 +39,11 @@ interface HotelSummary {
   address?: string;
   city?: string;
   country?: string;
+  main_photo?: string;
+  hotelImages?: { url: string; defaultImage?: boolean }[];
+  starRating?: number;
+  rating?: number;
+  reviewCount?: number;
 }
 
 interface GuestDetails {
@@ -50,6 +60,17 @@ declare global {
 
 const GUEST_STORAGE_KEY = "liteapi_guest_details";
 
+function formatStayDate(dateStr: string): string {
+  if (!dateStr) return dateStr;
+  const d = new Date(dateStr);
+  if (Number.isNaN(d.getTime())) return dateStr;
+  return d.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric"
+  });
+}
+
 function CheckoutLoading() {
   return (
     <div className="flex-1 flex flex-col px-4 pb-6 pt-4 gap-4">
@@ -63,12 +84,18 @@ function CheckoutLoading() {
 function CheckoutContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const { locale } = useLocaleCurrency();
 
   const hotelId = searchParams.get("hotelId") ?? "";
   const offerId = searchParams.get("offerId") ?? "";
   const checkin = searchParams.get("checkin") ?? "";
   const checkout = searchParams.get("checkout") ?? "";
-  const adults = Number(searchParams.get("adults") ?? "2");
+  const occupanciesParam = searchParams.get("occupancies");
+  const occupancies = useMemo(
+    () => parseOccupanciesParam(occupanciesParam),
+    [occupanciesParam]
+  );
+  const guestsCount = totalGuests(occupancies);
 
   const [prebook, setPrebook] = useState<PrebookPayload | null>(null);
   const [prebookError, setPrebookError] = useState<string | null>(null);
@@ -119,6 +146,7 @@ function CheckoutContent() {
         const res = await fetch("/api/rates/prebook", {
           method: "POST",
           headers: { "content-type": "application/json" },
+          credentials: "include",
           body: JSON.stringify({
             offerId,
             usePaymentSdk: true
@@ -145,7 +173,10 @@ function CheckoutContent() {
   useEffect(() => {
     if (!hotelId || !prebook?.data?.hotelId) return;
     let cancelled = false;
-    fetch(`/api/hotel/details?hotelId=${encodeURIComponent(hotelId)}`)
+    const detailsUrl = new URL("/api/hotel/details", window.location.origin);
+    detailsUrl.searchParams.set("hotelId", hotelId);
+    if (locale) detailsUrl.searchParams.set("language", locale);
+    fetch(detailsUrl.toString(), { credentials: "include" })
       .then((res) => res.json())
       .then((json) => {
         if (cancelled || json?.error) return;
@@ -155,7 +186,12 @@ function CheckoutContent() {
             name: data.name ?? "Hotel",
             address: data.address,
             city: data.city,
-            country: data.country
+            country: data.country,
+            main_photo: data.main_photo,
+            hotelImages: data.hotelImages,
+            starRating: data.starRating,
+            rating: data.rating,
+            reviewCount: data.reviewCount
           });
         }
       })
@@ -163,7 +199,7 @@ function CheckoutContent() {
     return () => {
       cancelled = true;
     };
-  }, [hotelId, prebook?.data?.hotelId]);
+  }, [hotelId, prebook?.data?.hotelId, locale]);
 
   const handleGuestSubmit = (e: FormEvent) => {
     e.preventDefault();
@@ -228,14 +264,15 @@ function CheckoutContent() {
       transactionId,
       hotelId,
       checkin,
-      checkout,
-      adults: String(adults)
-    }).toString();
+      checkout
+    });
+    if (occupanciesParam) retParams.set("occupancies", occupanciesParam);
+    const retParamsStr = retParams.toString();
 
     const liteAPIConfig = {
       publicKey: process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY || "sandbox",
       secretKey,
-      returnUrl: `${origin}/confirmation?${retParams}`,
+      returnUrl: `${origin}/confirmation?${retParamsStr}`,
       targetElement: "#payment-element",
       appearance: { theme: "flat" },
       options: {
@@ -252,10 +289,57 @@ function CheckoutContent() {
         err?.message ?? "Failed to initialize payment form"
       );
     }
-  }, [showPayment, prebook, paymentScriptReady, hotelId, checkin, checkout, adults]);
+  }, [showPayment, prebook, paymentScriptReady, hotelId, checkin, checkout, occupanciesParam]);
 
-  const firstRate = prebook?.data?.roomTypes?.[0]?.rates?.[0];
-  const total = firstRate?.retailRate?.total?.[0];
+  const roomTypes = prebook?.data?.roomTypes ?? [];
+  const firstRoomType = roomTypes[0];
+  const firstRate = firstRoomType?.rates?.[0];
+
+  // Pay now = prebook top-level price (LiteAPI: amount to pay online; includes commission + included taxes only)
+  const payNow =
+    prebook?.data?.price != null && prebook?.data?.currency
+      ? { amount: prebook.data.price, currency: prebook.data.currency }
+      : null;
+
+  // Per LiteAPI: included = in retailRate.total (pay now); included: false = pay at property (local fees)
+  const { includedTaxesAndFeesTotal, localFeesTotal } = (() => {
+    if (!payNow) return { includedTaxesAndFeesTotal: null as number | null, localFeesTotal: null as number | null };
+    let included = 0;
+    let local = 0;
+    for (const rt of roomTypes) {
+      for (const r of (rt as any).rates ?? []) {
+        const commission = r?.commission?.[0];
+        if (commission?.amount != null && typeof commission.amount === "number") included += commission.amount;
+        const taxes = r?.retailRate?.taxesAndFees;
+        if (Array.isArray(taxes)) {
+          for (const t of taxes) {
+            if (t?.amount == null || typeof t.amount !== "number") continue;
+            if (t.included) included += t.amount;
+            else local += t.amount;
+          }
+        }
+      }
+    }
+    return {
+      includedTaxesAndFeesTotal: included > 0 ? included : null,
+      localFeesTotal: local > 0 ? local : null
+    };
+  })();
+
+  // Total = Pay now + Local fees (reference: Total = base + included taxes + local fees)
+  const total = payNow
+    ? {
+        amount: payNow.amount + (localFeesTotal ?? 0),
+        currency: payNow.currency
+      }
+    : null;
+
+  // Base (1 room × 1 night line) = Pay now - included taxes and fees
+  const baseAmount =
+    payNow && includedTaxesAndFeesTotal != null
+      ? payNow.amount - includedTaxesAndFeesTotal
+      : payNow?.amount ?? null;
+
   const taxes = firstRate?.retailRate?.taxesAndFees?.[0];
   const cancelInfo = firstRate?.cancellationPolicies?.cancelPolicyInfos?.[0]?.cancelTime;
   const refundableTag = firstRate?.cancellationPolicies?.refundableTag;
@@ -282,11 +366,8 @@ function CheckoutContent() {
         <button
           type="button"
           onClick={() => {
-            const params = new URLSearchParams({
-              checkin,
-              checkout,
-              adults: String(adults)
-            });
+            const params = new URLSearchParams({ checkin, checkout });
+            if (occupanciesParam) params.set("occupancies", occupanciesParam);
             router.push(`/hotel/${hotelId}?${params.toString()}`);
           }}
           className="h-9 w-9 rounded-full border border-slate-700 flex items-center justify-center text-slate-200 text-sm"
@@ -298,8 +379,8 @@ function CheckoutContent() {
             Secure your stay
           </h1>
           <p className="text-[11px] text-slate-400">
-            {checkin} → {checkout} · {adults}{" "}
-            {adults === 1 ? "guest" : "guests"}
+            {checkin} → {checkout} · {guestsCount}{" "}
+            {guestsCount === 1 ? "guest" : "guests"}
           </p>
         </div>
       </header>
@@ -318,111 +399,188 @@ function CheckoutContent() {
 
       {!loadingPrebook && prebook && (
         <>
-          <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 space-y-3">
-            <h2 className="text-sm font-semibold text-slate-100">
-              Your booking
-            </h2>
-            <div className="space-y-2 text-sm">
-              <div>
-                <p className="text-[11px] font-medium text-slate-400 uppercase tracking-wide">
-                  Hotel
-                </p>
-                <p className="font-medium text-slate-50">
+          {/* Booking-style hotel header */}
+          <section className="rounded-2xl border border-slate-800 bg-slate-900/80 overflow-hidden">
+            <div className="p-4 flex gap-3">
+              <div className="w-20 h-20 rounded-xl overflow-hidden bg-slate-800 flex-shrink-0">
+                {(hotelSummary?.hotelImages?.find((i) => i.defaultImage)?.url ??
+                  hotelSummary?.main_photo ??
+                  hotelSummary?.hotelImages?.[0]?.url) ? (
+                  <img
+                    src={
+                      hotelSummary?.hotelImages?.find((i) => i.defaultImage)?.url ??
+                      hotelSummary?.main_photo ??
+                      hotelSummary?.hotelImages?.[0]?.url
+                    }
+                    alt={hotelSummary?.name ?? "Hotel"}
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center text-[10px] text-slate-500">
+                    No photo
+                  </div>
+                )}
+              </div>
+              <div className="flex-1 min-w-0">
+                <h2 className="text-base font-semibold text-slate-50 leading-tight">
                   {hotelSummary?.name ?? "Loading…"}
-                </p>
+                </h2>
                 {(hotelSummary?.address || hotelSummary?.city || hotelSummary?.country) && (
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    {[hotelSummary.address, hotelSummary.city, hotelSummary.country]
+                  <p className="text-xs text-slate-400 mt-0.5 flex items-center gap-1">
+                    <span aria-hidden>📍</span>
+                    {[hotelSummary?.address, hotelSummary?.city, hotelSummary?.country]
                       .filter(Boolean)
                       .join(", ")}
                   </p>
                 )}
-              </div>
-              <div>
-                <p className="text-[11px] font-medium text-slate-400 uppercase tracking-wide">
-                  Room
-                </p>
-                <p className="text-slate-50">
-                  {roomName ?? "Room"}
-                  {boardName ? ` · ${boardName}` : ""}
-                </p>
-              </div>
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div>
-                  <p className="text-[11px] font-medium text-slate-400 uppercase tracking-wide">
-                    Check-in
-                  </p>
-                  <p className="text-slate-200">{checkin}</p>
-                </div>
-                <div>
-                  <p className="text-[11px] font-medium text-slate-400 uppercase tracking-wide">
-                    Check-out
-                  </p>
-                  <p className="text-slate-200">{checkout}</p>
-                </div>
-                <div>
-                  <p className="text-[11px] font-medium text-slate-400 uppercase tracking-wide">
-                    Nights
-                  </p>
-                  <p className="text-slate-200">{nights}</p>
-                </div>
-                <div>
-                  <p className="text-[11px] font-medium text-slate-400 uppercase tracking-wide">
-                    Guests
-                  </p>
-                  <p className="text-slate-200">
-                    {adults} {adults === 1 ? "adult" : "adults"}
-                  </p>
+                <div className="flex flex-wrap items-center gap-2 mt-1.5">
+                  {hotelSummary?.starRating != null && (
+                    <span className="text-amber-300 text-xs">
+                      {"★".repeat(hotelSummary.starRating)}
+                    </span>
+                  )}
+                  {hotelSummary?.rating != null && hotelSummary?.reviewCount != null && (
+                    <span className="rounded bg-emerald-500/20 text-emerald-300 text-[11px] font-medium px-1.5 py-0.5">
+                      {hotelSummary.rating.toFixed(1)}{" "}
+                      {hotelSummary.rating >= 9
+                        ? "Wonderful"
+                        : hotelSummary.rating >= 8
+                          ? "Excellent"
+                          : hotelSummary.rating >= 7
+                            ? "Very Good"
+                            : "Good"}{" "}
+                      ({hotelSummary.reviewCount.toLocaleString()})
+                    </span>
+                  )}
                 </div>
               </div>
             </div>
+            <div className="px-4 pb-3">
+              <p className="text-xs text-slate-400">
+                {formatStayDate(checkin)} – {formatStayDate(checkout)} ({nights}{" "}
+                {nights === 1 ? "night" : "nights"})
+              </p>
+            </div>
           </section>
 
+          {/* Your Rooms */}
+          <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 space-y-3">
+            <h2 className="text-sm font-semibold text-slate-100">
+              Your Rooms
+            </h2>
+            <div className="space-y-1.5 text-sm">
+              <p className="font-medium text-slate-50">
+                {occupancies.length > 1
+                  ? `${occupancies.length} x ${roomName ?? "Room"}${boardName ? `, ${boardName}` : ""}`
+                  : `${roomName ?? "Room"}${boardName ? `, ${boardName}` : ""}`}
+              </p>
+              <p className="text-xs text-slate-400">
+                {occupancies
+                  .map(
+                    (o) =>
+                      `${o.adults} ${o.adults === 1 ? "Adult" : "Adults"}${
+                        o.children?.length
+                          ? `, ${o.children.length} ${o.children.length === 1 ? "Child" : "Children"}`
+                          : ""
+                      }`
+                  )
+                  .join(" · ")}
+              </p>
+              <p className="text-[11px] text-slate-500">
+                {refundableTag === "NRF" || refundableTag === "NRFN"
+                  ? "Non-refundable"
+                  : cancelInfo
+                    ? `Free cancellation until ${cancelInfo}`
+                    : "Flexible cancellation"}
+                {" · "}
+                Cancellation policy applies
+              </p>
+              {payNow && nights > 0 && occupancies.length > 0 && (
+                <p className="text-xs text-slate-400">
+                  {payNow.currency}{" "}
+                  {(payNow.amount / (nights * occupancies.length)).toFixed(2)} average per
+                  room/night
+                </p>
+              )}
+            </div>
+          </section>
+
+          {/* Price breakdown (LiteAPI: included = pay now; included: false = pay at property. Match reference layout.) */}
           <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 space-y-2 text-sm">
             <h2 className="text-sm font-semibold text-slate-100">
-              Price
+              Price summary
             </h2>
-            {total && (
+            {payNow && total && (
               <>
-                {taxes && !taxes.included && typeof taxes.amount === "number" && (
-                  <div className="flex justify-between text-slate-300">
-                    <span>Subtotal</span>
-                    <span>
-                      {total.currency}{" "}
-                      {(total.amount - taxes.amount).toFixed(2)}
-                    </span>
-                  </div>
-                )}
-                {taxes && typeof taxes.amount === "number" && (
-                  <div className="flex justify-between text-slate-300">
-                    <span>Taxes & fees</span>
-                    <span>
-                      {total.currency} {taxes.amount.toFixed(2)}
-                    </span>
-                  </div>
-                )}
-                <div className="flex items-baseline justify-between pt-1 border-t border-slate-700">
-                  <span className="font-medium text-slate-200">
-                    Total {taxes?.included ? "(incl. taxes)" : ""}
+                <div className="flex justify-between text-slate-300">
+                  <span>
+                    {occupancies.length} {occupancies.length === 1 ? "room" : "rooms"} × {nights}{" "}
+                    {nights === 1 ? "night" : "nights"}
                   </span>
-                  <span className="text-base font-semibold text-slate-50">
-                    {total.currency} {total.amount.toFixed(0)}
-                    {taxes?.included && (
-                      <span className="block text-[11px] font-normal text-slate-400">
-                        includes taxes & fees
-                      </span>
-                    )}
+                  <span>
+                    {payNow.currency}{" "}
+                    {(baseAmount != null ? baseAmount : payNow.amount).toFixed(2)}
                   </span>
                 </div>
+                {(includedTaxesAndFeesTotal != null || taxes?.included) && (
+                  <div className="flex justify-between text-slate-400 text-xs items-center gap-1">
+                    <span className="flex items-center gap-1">
+                      Included taxes and fees
+                      <span className="text-slate-500" title="Commission and taxes included in the price above">
+                        (i)
+                      </span>
+                    </span>
+                    <span>
+                      {includedTaxesAndFeesTotal != null
+                        ? `${payNow.currency} ${includedTaxesAndFeesTotal.toFixed(2)}`
+                        : "—"}
+                    </span>
+                  </div>
+                )}
+                {localFeesTotal != null && localFeesTotal > 0 && (
+                  <div className="flex justify-between text-slate-400 text-xs items-center gap-1">
+                    <span className="flex items-center gap-1">
+                      Local fees
+                      <span className="text-slate-500" title="Fees paid at the property">
+                        (i)
+                      </span>
+                    </span>
+                    <span>{payNow.currency} {localFeesTotal.toFixed(2)}</span>
+                  </div>
+                )}
+                <div className="flex items-baseline justify-between pt-2 border-t border-slate-700">
+                  <span className="font-medium text-slate-200">Total</span>
+                  <span className="text-base font-semibold text-slate-50">
+                    {total.currency} {total.amount.toFixed(2)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between pt-1">
+                  <span className="text-xs font-medium text-emerald-400 flex items-center gap-1">
+                    <span aria-hidden>💵</span>
+                    Pay now
+                  </span>
+                  <span className="text-base font-semibold text-slate-50">
+                    {payNow.currency} {payNow.amount.toFixed(2)}
+                  </span>
+                </div>
+                {localFeesTotal != null && localFeesTotal > 0 && (
+                  <>
+                    <div className="flex items-center justify-between pt-1">
+                      <span className="text-xs text-slate-400 flex items-center gap-1">
+                        <span aria-hidden>🏨</span>
+                        Pay at property
+                      </span>
+                      <span className="text-sm font-medium text-slate-300">
+                        {payNow.currency} {localFeesTotal.toFixed(2)}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-500 pt-1">
+                      Pay at property amount is an approximate price based on the current exchange rate and may change before your stay.
+                    </p>
+                  </>
+                )}
               </>
             )}
-            <p className="text-[11px] text-slate-400 pt-1">
-              {refundableTag === "NRF" || refundableTag === "NRFN"
-                ? "This booking is non-refundable."
-                : cancelInfo
-                  ? `Free cancellation until ${cancelInfo}.`
-                  : "Flexible cancellation policy; see full details in hotel terms."}
-            </p>
           </section>
 
           <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 space-y-3">

@@ -13,7 +13,12 @@ async function request<T>(
   base: "api" | "book",
   path: string,
   method: HttpMethod,
-  options?: { searchParams?: URLSearchParams; body?: unknown }
+  options?: {
+    searchParams?: URLSearchParams;
+    body?: unknown;
+    /** Phase 2: override API key (B2C vs CUG). If not set, uses LITEAPI_API_KEY. */
+    apiKey?: string;
+  }
 ): Promise<T> {
   const url = new URL(
     (base === "api" ? API_BASE : BOOK_BASE) + path
@@ -24,15 +29,18 @@ async function request<T>(
     });
   }
 
-  const LITEAPI_API_KEY = process.env.LITEAPI_API_KEY;
-  if (!LITEAPI_API_KEY) {
-    throw new Error("LITEAPI_API_KEY is not set in environment variables");
+  const apiKey =
+    options?.apiKey ?? process.env.LITEAPI_API_KEY ?? null;
+  if (!apiKey) {
+    throw new Error(
+      "LITEAPI_API_KEY (or apiKey override) is not set in environment variables"
+    );
   }
 
   const res = await fetch(url.toString(), {
     method,
     headers: {
-      "X-API-Key": LITEAPI_API_KEY,
+      "X-API-Key": apiKey,
       accept: "application/json",
       ...(method === "POST"
         ? { "content-type": "application/json" }
@@ -69,14 +77,23 @@ async function request<T>(
   return json as T;
 }
 
-export async function getPlaces(textQuery: string) {
+export async function getPlaces(
+  textQuery: string,
+  language?: string,
+  apiKey?: string
+) {
   const params = new URLSearchParams({ textQuery });
+  if (language) params.set("language", language);
   return request<{ data: any[] }>("api", "/data/places", "GET", {
-    searchParams: params
+    searchParams: params,
+    apiKey
   });
 }
 
 export type RatesSearchMode = "place" | "vibe";
+
+/** One room: adults + child ages (integers) for API */
+export type OccupancyInput = { adults: number; children?: number[] };
 
 export interface RatesSearchParams {
   mode: RatesSearchMode;
@@ -84,63 +101,49 @@ export interface RatesSearchParams {
   aiSearch?: string;
   checkin: string;
   checkout: string;
-  adults: number;
+  occupancies: OccupancyInput[];
   currency?: string;
   guestNationality?: string;
+  language?: string;
+  limit?: number;
+  timeout?: number;
+  /** Phase 3: CUG margin % (e.g. 10). Sent to LiteAPI when provided. */
+  margin?: number;
+  /** Phase 3: Optional additional markup for LiteAPI. */
+  additionalMarkup?: number;
+  /** If true, only refundable rates (RFN) are included. LiteAPI docs: refundableRatesOnly. */
+  refundableRatesOnly?: boolean;
+  /** Number of room rates per hotel, sorted by price (cheapest first). 1 = cheapest only. */
+  maxRatesPerHotel?: number;
 }
 
-export async function searchHotelRates(params: RatesSearchParams) {
+export async function searchHotelRates(
+  params: RatesSearchParams,
+  apiKey?: string
+) {
   const {
     mode,
     placeId,
     aiSearch,
     checkin,
     checkout,
-    adults,
+    occupancies,
     currency = "USD",
-    guestNationality = "US"
+    guestNationality = "US",
+    language,
+    limit,
+    timeout,
+    margin,
+    additionalMarkup,
+    refundableRatesOnly,
+    maxRatesPerHotel
   } = params;
 
   const body: any = {
-    occupancies: [{ adults }],
-    currency,
-    guestNationality,
-    checkin,
-    checkout,
-    roomMapping: true,
-    includeHotelData: true,
-    maxRatesPerHotel: 1
-  };
-
-  if (mode === "place" && placeId) {
-    body.placeId = placeId;
-  } else if (mode === "vibe" && aiSearch) {
-    body.aiSearch = aiSearch;
-  }
-
-  return request<any>("api", "/hotels/rates", "POST", { body });
-}
-
-export async function getHotelRatesForHotel(params: {
-  hotelId: string;
-  checkin: string;
-  checkout: string;
-  adults: number;
-  currency?: string;
-  guestNationality?: string;
-}) {
-  const {
-    hotelId,
-    checkin,
-    checkout,
-    adults,
-    currency = "USD",
-    guestNationality = "US"
-  } = params;
-
-  const body = {
-    hotelIds: [hotelId],
-    occupancies: [{ adults }],
+    occupancies: occupancies.map((o) => ({
+      adults: o.adults,
+      ...(o.children && o.children.length > 0 ? { children: o.children } : {})
+    })),
     currency,
     guestNationality,
     checkin,
@@ -149,27 +152,99 @@ export async function getHotelRatesForHotel(params: {
     includeHotelData: true
   };
 
-  return request<any>("api", "/hotels/rates", "POST", { body });
+  if (language) body.language = language;
+  if (limit) body.limit = limit;
+  if (timeout) body.timeout = timeout;
+  if (margin != null && typeof margin === "number") body.margin = margin;
+  if (additionalMarkup != null && typeof additionalMarkup === "number") body.additionalMarkup = additionalMarkup;
+  if (refundableRatesOnly === true) body.refundableRatesOnly = true;
+  if (maxRatesPerHotel != null && typeof maxRatesPerHotel === "number") body.maxRatesPerHotel = maxRatesPerHotel;
+
+  if (mode === "place" && placeId) {
+    body.placeId = placeId;
+  } else if (mode === "vibe" && aiSearch) {
+    body.aiSearch = aiSearch;
+  }
+
+  return request<any>("api", "/hotels/rates", "POST", { body, apiKey });
 }
 
-export async function getHotelDetails(hotelId: string) {
+export async function getHotelRatesForHotel(params: {
+  hotelId: string;
+  checkin: string;
+  checkout: string;
+  occupancies: OccupancyInput[];
+  currency?: string;
+  guestNationality?: string;
+  language?: string;
+  /** Phase 3: CUG margin %. */
+  margin?: number;
+  /** Phase 3: Optional additional markup. */
+  additionalMarkup?: number;
+  },
+  apiKey?: string
+) {
+  const {
+    hotelId,
+    checkin,
+    checkout,
+    occupancies,
+    currency = "USD",
+    guestNationality = "US",
+    language,
+    margin,
+    additionalMarkup
+  } = params;
+
+  const body: Record<string, unknown> = {
+    hotelIds: [hotelId],
+    occupancies: occupancies.map((o) => ({
+      adults: o.adults,
+      ...(o.children && o.children.length > 0 ? { children: o.children } : {})
+    })),
+    currency,
+    guestNationality,
+    checkin,
+    checkout,
+    roomMapping: true,
+    includeHotelData: true
+  };
+
+  if (language) body.language = language;
+  if (margin != null && typeof margin === "number") body.margin = margin;
+  if (additionalMarkup != null && typeof additionalMarkup === "number") body.additionalMarkup = additionalMarkup;
+
+  return request<any>("api", "/hotels/rates", "POST", { body, apiKey });
+}
+
+export async function getHotelDetails(
+  hotelId: string,
+  language?: string,
+  apiKey?: string
+) {
   const params = new URLSearchParams({
     hotelId,
     timeout: "4"
   });
+  if (language) params.set("language", language);
   return request<{ data: any }>("api", "/data/hotel", "GET", {
-    searchParams: params
+    searchParams: params,
+    apiKey
   });
 }
 
-export async function prebookRate(body: {
-  usePaymentSdk: boolean;
-  offerId: string;
-}) {
-  return request<any>("book", "/rates/prebook", "POST", { body });
+export async function prebookRate(
+  body: {
+    usePaymentSdk: boolean;
+    offerId: string;
+  },
+  apiKey?: string
+) {
+  return request<any>("book", "/rates/prebook", "POST", { body, apiKey });
 }
 
-export async function bookRate(body: {
+export async function bookRate(
+  body: {
   prebookId: string;
   holder: {
     firstName: string;
@@ -186,7 +261,9 @@ export async function bookRate(body: {
     lastName: string;
     email: string;
   }[];
-}) {
-  return request<any>("book", "/rates/book", "POST", { body });
+  },
+  apiKey?: string
+) {
+  return request<any>("book", "/rates/book", "POST", { body, apiKey });
 }
 

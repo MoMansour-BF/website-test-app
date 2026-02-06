@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { LayoutClient } from "@/components/LayoutClient";
 import "./globals.css";
 
 export const metadata = {
@@ -8,10 +9,10 @@ export const metadata = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body className="bg-slate-950 text-slate-50">
         <div className="min-h-screen max-w-md mx-auto flex flex-col">
-          {children}
+          <LayoutClient>{children}</LayoutClient>
         </div>
       </body>
     </html>

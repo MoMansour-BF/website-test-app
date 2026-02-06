@@ -1,8 +1,9 @@
 "use client";
 
+import { parseOccupanciesParam, totalGuests } from "@/lib/occupancy";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useState, Suspense } from "react";
+import { useEffect, useMemo, useState, Suspense } from "react";
 
 interface GuestDetails {
   firstName: string;
@@ -54,7 +55,12 @@ function ConfirmationContent() {
   const hotelId = searchParams.get("hotelId") ?? "";
   const checkin = searchParams.get("checkin") ?? "";
   const checkout = searchParams.get("checkout") ?? "";
-  const adults = Number(searchParams.get("adults") ?? "2");
+  const occupanciesParam = searchParams.get("occupancies");
+  const occupancies = useMemo(
+    () => parseOccupanciesParam(occupanciesParam),
+    [occupanciesParam]
+  );
+  const guestsCount = totalGuests(occupancies);
 
   const [guest, setGuest] = useState<GuestDetails | null>(null);
   const [booking, setBooking] = useState<BookingResponse | null>(null);
@@ -93,6 +99,7 @@ function ConfirmationContent() {
         const res = await fetch("/api/rates/book", {
           method: "POST",
           headers: { "content-type": "application/json" },
+          credentials: "include",
           body: JSON.stringify({
             prebookId,
             holder: guestData,
@@ -100,14 +107,21 @@ function ConfirmationContent() {
               method: "TRANSACTION_ID",
               transactionId
             },
-            guests: [
-              {
-                occupancyNumber: 1,
-                firstName: guestData.firstName,
-                lastName: guestData.lastName,
-                email: guestData.email
-              }
-            ]
+            guests: occupancies.length > 0
+              ? occupancies.map((_, i) => ({
+                  occupancyNumber: i + 1,
+                  firstName: guestData.firstName,
+                  lastName: guestData.lastName,
+                  email: guestData.email
+                }))
+              : [
+                  {
+                    occupancyNumber: 1,
+                    firstName: guestData.firstName,
+                    lastName: guestData.lastName,
+                    email: guestData.email
+                  }
+                ]
           })
         });
         const json = await res.json();
@@ -125,16 +139,14 @@ function ConfirmationContent() {
     }
 
     run();
-  }, [guest, prebookId, transactionId]);
+  }, [guest, prebookId, transactionId, occupancies]);
 
   const policy = booking?.data?.cancellationPolicies;
   const cancelInfo = policy?.cancelPolicyInfos?.[0]?.cancelTime;
 
-  const hotelLinkParams = new URLSearchParams({
-    checkin,
-    checkout,
-    adults: String(adults)
-  }).toString();
+  const hotelLinkParams = new URLSearchParams({ checkin, checkout });
+  if (occupanciesParam) hotelLinkParams.set("occupancies", occupanciesParam);
+  const hotelLinkParamsStr = hotelLinkParams.toString();
 
   return (
     <main className="flex-1 flex flex-col px-4 pb-6 pt-6 gap-4">
@@ -240,7 +252,7 @@ function ConfirmationContent() {
             <Link
               href={
                 hotelId
-                  ? `/hotel/${hotelId}?${hotelLinkParams}`
+                  ? `/hotel/${hotelId}?${hotelLinkParamsStr}`
                   : "/"
               }
               className="block w-full rounded-full bg-slate-100 text-slate-900 text-sm font-semibold py-2.5 text-center"

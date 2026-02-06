@@ -1,5 +1,7 @@
-import { NextRequest, NextResponse } from "next/server";
+import { getChannelFromRequest } from "@/auth";
+import { getLiteApiKeyForChannel } from "@/lib/channel-keys";
 import { prebookRate } from "@/lib/liteapi";
+import { NextRequest, NextResponse } from "next/server";
 
 export async function POST(req: NextRequest) {
   let body: any = {};
@@ -22,10 +24,15 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const resp = await prebookRate({
-      offerId,
-      usePaymentSdk: usePaymentSdk ?? true
-    });
+    const channel = getChannelFromRequest(req);
+    const apiKey = getLiteApiKeyForChannel(channel);
+    const resp = await prebookRate(
+      {
+        offerId,
+        usePaymentSdk: usePaymentSdk ?? true
+      },
+      apiKey
+    );
     return NextResponse.json(resp);
   } catch (err: any) {
     return NextResponse.json(

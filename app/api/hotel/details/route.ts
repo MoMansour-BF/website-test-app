@@ -1,9 +1,12 @@
-import { NextRequest, NextResponse } from "next/server";
+import { getChannelFromRequest } from "@/auth";
+import { getLiteApiKeyForChannel } from "@/lib/channel-keys";
 import { getHotelDetails } from "@/lib/liteapi";
+import { NextRequest, NextResponse } from "next/server";
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const hotelId = searchParams.get("hotelId");
+  const language = searchParams.get("language") ?? undefined;
 
   if (!hotelId) {
     return NextResponse.json(
@@ -13,7 +16,9 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const resp = await getHotelDetails(hotelId);
+    const channel = getChannelFromRequest(req);
+    const apiKey = getLiteApiKeyForChannel(channel);
+    const resp = await getHotelDetails(hotelId, language, apiKey);
     return NextResponse.json(resp);
   } catch (err: any) {
     return NextResponse.json(

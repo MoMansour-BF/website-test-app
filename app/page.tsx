@@ -1,5 +1,8 @@
 "use client";
 
+import { RoomSelector } from "@/components/RoomSelector";
+import { useLocaleCurrency } from "@/context/LocaleCurrencyContext";
+import { DEFAULT_OCCUPANCIES, type Occupancy, serializeOccupancies } from "@/lib/occupancy";
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useRef, useState } from "react";
 
@@ -20,13 +23,14 @@ interface PlaceSuggestion {
 
 export default function HomePage() {
   const router = useRouter();
+  const { locale } = useLocaleCurrency();
   const [mode, setMode] = useState<SearchMode>("place");
   const [query, setQuery] = useState("");
   const [placeId, setPlaceId] = useState<string | null>(null);
   const [placeLabel, setPlaceLabel] = useState<string | null>(null);
   const [checkin, setCheckin] = useState("");
   const [checkout, setCheckout] = useState("");
-  const [adults, setAdults] = useState(2);
+  const [occupancies, setOccupancies] = useState<Occupancy[]>(() => DEFAULT_OCCUPANCIES);
   const [suggestions, setSuggestions] = useState<PlaceSuggestion[]>([]);
   const [loadingPlaces, setLoadingPlaces] = useState(false);
   const [placesError, setPlacesError] = useState<string | null>(null);
@@ -57,10 +61,12 @@ export default function HomePage() {
       try {
         setLoadingPlaces(true);
         setPlacesError(null);
-        const res = await fetch(
-          `/api/places?q=${encodeURIComponent(query.trim())}`,
-          { signal: controller.signal }
-        );
+        const params = new URLSearchParams({ q: query.trim() });
+        if (locale) params.set("language", locale);
+        const res = await fetch(`/api/places?${params.toString()}`, {
+          credentials: "include",
+          signal: controller.signal
+        });
         if (!res.ok) {
           throw new Error("Failed to load places");
         }
@@ -85,7 +91,7 @@ export default function HomePage() {
       controller.abort();
       clearTimeout(timeout);
     };
-  }, [mode, query]);
+  }, [mode, query, locale]);
 
   const canSubmit =
     !!checkin &&
@@ -101,7 +107,7 @@ export default function HomePage() {
       mode,
       checkin,
       checkout,
-      adults: String(adults)
+      occupancies: serializeOccupancies(occupancies)
     });
 
     if (mode === "place" && placeId && placeLabel) {
@@ -274,34 +280,7 @@ export default function HomePage() {
             </div>
           </div>
 
-          <div className="space-y-1">
-            <label className="text-xs font-medium text-slate-300">
-              Guests
-            </label>
-            <div className="flex items-center justify-between rounded-xl border border-slate-700 bg-slate-900 px-3 py-2">
-              <span className="text-sm text-slate-50">
-                {adults} {adults === 1 ? "adult" : "adults"}
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setAdults((a) => Math.max(1, a - 1))}
-                  className="h-8 w-8 rounded-full border border-slate-600 text-slate-200 flex items-center justify-center text-lg leading-none"
-                  aria-label="Decrease adults"
-                >
-                  –
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setAdults((a) => a + 1)}
-                  className="h-8 w-8 rounded-full bg-emerald-500 text-slate-900 flex items-center justify-center text-lg leading-none font-semibold"
-                  aria-label="Increase adults"
-                >
-                  +
-                </button>
-              </div>
-            </div>
-          </div>
+          <RoomSelector occupancies={occupancies} onChange={setOccupancies} />
 
           <button
             type="submit"

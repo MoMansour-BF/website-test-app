@@ -1,8 +1,10 @@
 "use client";
 
+import { ImageGallery } from "@/components/ImageGallery";
+import { useLocaleCurrency } from "@/context/LocaleCurrencyContext";
+import { getNights, parseOccupanciesParam, toApiOccupancies, totalGuests } from "@/lib/occupancy";
 import { useParams, useSearchParams, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { ImageGallery } from "@/components/ImageGallery";
 
 interface HotelDetails {
   id: string;
@@ -24,41 +26,61 @@ interface HotelDetails {
   rooms?: {
     id: number;
     roomName: string;
+    description?: string;
+    roomSizeSquare?: number;
+    roomSizeUnit?: string;
+    maxOccupancy?: number;
+    bedTypes?: { quantity?: number; bedType?: string; bedSize?: string }[];
+    roomAmenities?: { name?: string }[];
     photos?: { url: string }[];
   }[];
 }
 
-interface Rate {
-  name: string;
-  mappedRoomId: number;
-  boardName: string;
+/** One selectable rate option (one offerId) under a room type. */
+interface RoomTypeOffer {
   offerId: string;
-  retailRate: {
-    total: { amount: number; currency: string }[];
-    taxesAndFees?: { included?: boolean; amount?: number }[];
-  };
-  cancellationPolicies?: {
-    refundableTag?: string;
-    cancelPolicyInfos?: { cancelTime?: string }[];
-  };
+  boardName: string;
+  /** Total to pay now (offerRetailRate = commission + included taxes). */
+  totalAmount: number;
+  currency: string;
+  taxIncluded?: boolean;
+  /** Sum of taxesAndFees where included: false (pay at property). */
+  payAtPropertyAmount?: number;
+  refundableTag?: string;
+  cancelTime?: string;
+  mappedRoomId?: number;
 }
 
+/** One card = one room type; contains all rate options (board + refundability). */
 interface RoomGroup {
   roomId: number;
   roomName: string;
+  displayName: string;
   image?: string;
-  offers: Rate[];
+  offers: RoomTypeOffer[];
 }
 
 export default function HotelPage() {
   const params = useParams<{ hotelId: string }>();
   const searchParams = useSearchParams();
   const router = useRouter();
+  const { currency, locale } = useLocaleCurrency();
 
   const hotelId = params.hotelId;
   const checkin = searchParams.get("checkin") ?? "";
   const checkout = searchParams.get("checkout") ?? "";
-  const adults = Number(searchParams.get("adults") ?? "2");
+  const occupanciesParam = searchParams.get("occupancies");
+  const adultsLegacy = searchParams.get("adults");
+  const occupancies = useMemo(() => {
+    if (occupanciesParam) return parseOccupanciesParam(occupanciesParam);
+    const a = Number(adultsLegacy);
+    if (a >= 1) return [{ adults: a, children: [] }];
+    return parseOccupanciesParam(null);
+  }, [occupanciesParam, adultsLegacy]);
+  const effectiveOccupanciesParam =
+    occupanciesParam ?? (adultsLegacy ? `${adultsLegacy}` : "");
+  const guestsCount = totalGuests(occupancies);
+  const nights = getNights(checkin, checkout);
 
   const [details, setDetails] = useState<HotelDetails | null>(null);
   const [ratesData, setRatesData] = useState<any | null>(null);
@@ -67,6 +89,7 @@ export default function HotelPage() {
   const [galleryOpen, setGalleryOpen] = useState(false);
   const [galleryImages, setGalleryImages] = useState<{ url: string }[]>([]);
   const [galleryInitialIndex, setGalleryInitialIndex] = useState(0);
+  const [expandedRoomId, setExpandedRoomId] = useState<number | null>(null);
 
   useEffect(() => {
     async function run() {
@@ -74,16 +97,23 @@ export default function HotelPage() {
         setLoading(true);
         setError(null);
 
+        const detailsUrl = new URL("/api/hotel/details", window.location.origin);
+        detailsUrl.searchParams.set("hotelId", hotelId);
+        if (locale) detailsUrl.searchParams.set("language", locale);
+
         const [detailsRes, ratesRes] = await Promise.all([
-          fetch(`/api/hotel/details?hotelId=${encodeURIComponent(hotelId)}`),
+          fetch(detailsUrl.toString(), { credentials: "include" }),
           fetch("/api/rates/hotel", {
             method: "POST",
             headers: { "content-type": "application/json" },
+            credentials: "include",
             body: JSON.stringify({
               hotelId,
               checkin,
               checkout,
-              adults
+              occupancies: toApiOccupancies(occupancies),
+              currency,
+              language: locale
             })
           })
         ]);
@@ -112,7 +142,7 @@ export default function HotelPage() {
     }
 
     run();
-  }, [hotelId, checkin, checkout, adults]);
+  }, [hotelId, checkin, checkout, occupancies, currency, locale]);
 
   const heroImage =
     details?.hotelImages?.find((img) => img.defaultImage)?.url ??
@@ -147,53 +177,94 @@ export default function HotelPage() {
     setGalleryOpen(true);
   };
 
+  /** Group offers by room type (mappedRoomId). One card per room, "Nx" when multiple rooms. */
   const roomGroups: RoomGroup[] = useMemo(() => {
-    const map = new Map<number, RoomGroup>();
     if (!ratesData?.data || !Array.isArray(ratesData.data)) return [];
     const hotel = ratesData.data[0];
     const roomTypes = hotel?.roomTypes ?? [];
+    const map = new Map<number, RoomGroup>();
 
     for (const rt of roomTypes) {
-      const roomRates: Rate[] = (rt.rates ?? []).map((rate: any) => ({
-        name: rate.name,
-        mappedRoomId: rate.mappedRoomId,
-        boardName: rate.boardName,
-        offerId: rt.offerId,
-        retailRate: rate.retailRate,
-        cancellationPolicies: rate.cancellationPolicies
-      }));
+      const firstRate = rt.rates?.[0];
+      if (!firstRate || !rt.offerId) continue;
+      const offerLevel = rt.offerRetailRate ?? rt.suggestedSellingPrice;
+      let amount: number | undefined;
+      let curr: string | undefined;
+      if (offerLevel?.amount != null && typeof offerLevel.amount === "number") {
+        amount = offerLevel.amount;
+        curr = offerLevel.currency;
+      } else {
+        const rates = rt.rates ?? [];
+        let sum = 0;
+        for (const r of rates) {
+          const t = r?.retailRate?.total?.[0];
+          if (t?.amount != null && typeof t.amount === "number") {
+            sum += t.amount;
+            curr = t.currency;
+          }
+        }
+        amount = sum > 0 ? sum : undefined;
+      }
+      if (amount == null || typeof amount !== "number") continue;
+      curr = curr ?? firstRate.retailRate?.total?.[0]?.currency ?? "USD";
+      const mappedRoomId = firstRate.mappedRoomId ?? 0;
+      const roomMeta = details?.rooms?.find((r) => r.id === mappedRoomId);
+      const roomName = firstRate.name ?? roomMeta?.roomName ?? "Room";
+      const taxInfo = firstRate.retailRate?.taxesAndFees?.[0];
+      const cancelInfo = firstRate.cancellationPolicies?.cancelPolicyInfos?.[0];
+      const image = roomMeta?.photos?.[0]?.url ?? heroImage;
 
-      for (const rate of roomRates) {
-        const roomId = rate.mappedRoomId;
-        if (!roomId) continue;
-        const existing = map.get(roomId);
-        const roomMeta = details?.rooms?.find((r) => r.id === roomId);
-        const image =
-          roomMeta?.photos?.[0]?.url ??
-          heroImage;
-        const group: RoomGroup = existing ?? {
-          roomId,
-          roomName: roomMeta?.roomName ?? rate.name,
+      // Pay at property = sum of taxesAndFees where included: false (LiteAPI)
+      let payAtProperty = 0;
+      for (const r of rt.rates ?? []) {
+        const fees = r?.retailRate?.taxesAndFees;
+        if (Array.isArray(fees)) {
+          for (const f of fees) {
+            if (f?.included === false && typeof f?.amount === "number") payAtProperty += f.amount;
+          }
+        }
+      }
+
+      const offer: RoomTypeOffer = {
+        offerId: rt.offerId,
+        boardName: firstRate.boardName ?? "Room Only",
+        totalAmount: amount,
+        currency: curr ?? "USD",
+        taxIncluded: taxInfo?.included,
+        payAtPropertyAmount: payAtProperty > 0 ? payAtProperty : undefined,
+        refundableTag: firstRate.cancellationPolicies?.refundableTag,
+        cancelTime: cancelInfo?.cancelTime,
+        mappedRoomId: mappedRoomId || undefined
+      };
+
+      const existing = map.get(mappedRoomId);
+      if (existing) {
+        existing.offers.push(offer);
+      } else {
+        const displayName =
+          occupancies.length > 1 ? `${occupancies.length}x ${roomName}` : roomName;
+        map.set(mappedRoomId, {
+          roomId: mappedRoomId,
+          roomName,
+          displayName,
           image,
-          offers: []
-        };
-        group.offers.push(rate);
-        map.set(roomId, group);
+          offers: [offer]
+        });
       }
     }
 
     return Array.from(map.values());
-  }, [ratesData, details, heroImage]);
+  }, [ratesData, details, heroImage, occupancies.length]);
 
-  const handleSelectOffer = (offer: Rate) => {
+  const handleSelectOffer = (offer: RoomTypeOffer) => {
     const params = new URLSearchParams({
       hotelId,
       offerId: offer.offerId,
       checkin,
-      checkout,
-      adults: String(adults)
-    }).toString();
-    router.push(`/checkout?${params}`);
+      checkout
+    });
+    if (effectiveOccupanciesParam) params.set("occupancies", effectiveOccupanciesParam);
+    router.push(`/checkout?${params.toString()}`);
   };
 
   return (
@@ -216,8 +287,8 @@ export default function HotelPage() {
             {details?.name ?? "Hotel"}
           </h1>
           <p className="text-[11px] text-slate-400 truncate">
-            {checkin} → {checkout} · {adults}{" "}
-            {adults === 1 ? "guest" : "guests"}
+            {checkin} → {checkout} · {guestsCount}{" "}
+            {guestsCount === 1 ? "guest" : "guests"}
           </p>
         </div>
       </header>
@@ -392,110 +463,199 @@ export default function HotelPage() {
             <h3 className="text-xs font-semibold text-slate-200">
               Choose your room
             </h3>
+            <p className="text-[11px] text-slate-400">
+              Prices are total for {nights} {nights === 1 ? "night" : "nights"} for {occupancies.length} {occupancies.length === 1 ? "room" : "rooms"}.
+            </p>
             {roomGroups.length === 0 && (
               <p className="text-xs text-slate-400">
                 No rooms are currently available for your dates.
               </p>
             )}
             <div className="space-y-3">
-              {roomGroups.map((room) => (
-                <div
-                  key={room.roomId}
-                  className="rounded-2xl border border-slate-800 bg-slate-900/80 p-3 space-y-2"
-                >
-                  <div className="flex gap-2">
-                    <div className="w-20 h-20 rounded-xl overflow-hidden bg-slate-800 flex-shrink-0">
-                      {room.image ? (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const roomMeta = details?.rooms?.find((r) => r.id === room.roomId);
-                            const photos = roomMeta?.photos ?? [];
-                            if (photos.length > 0) {
-                              openRoomGallery(
-                                room.roomId,
-                                photos.findIndex((p) => p.url === room.image) >= 0
-                                  ? photos.findIndex((p) => p.url === room.image)
-                                  : 0
-                              );
-                            }
-                          }}
-                          className="w-full h-full block"
-                        >
-                          <img
-                            src={room.image}
-                            alt={room.roomName}
-                            className="w-full h-full object-cover cursor-pointer"
-                          />
-                        </button>
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center text-[10px] text-slate-500">
-                          No photo
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex-1">
-                      <h4 className="text-sm font-semibold leading-snug">
-                        {room.roomName}
-                      </h4>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    {room.offers.map((offer) => {
-                      const total = offer.retailRate.total[0];
-                      const tax =
-                        offer.retailRate.taxesAndFees?.[0];
-                      const cancel =
-                        offer.cancellationPolicies
-                          ?.cancelPolicyInfos?.[0]
-                          ?.cancelTime;
-                      const refundableTag =
-                        offer.cancellationPolicies
-                          ?.refundableTag;
-
-                      return (
-                        <div
-                          key={offer.offerId + offer.boardName}
-                          className="rounded-xl border border-slate-800 bg-slate-950/60 p-2.5 flex items-center justify-between gap-2"
-                        >
-                          <div className="flex-1">
-                            <p className="text-xs font-medium text-slate-50">
-                              {offer.boardName}
-                            </p>
-                            <p className="text-[11px] text-slate-400">
-                              {refundableTag === "NRF" ||
-                                refundableTag === "NRFN"
-                                ? "Non-refundable"
-                                : cancel
-                                  ? `Free cancellation until ${cancel}`
-                                  : "Flexible cancellation"}
-                            </p>
+              {roomGroups.map((room) => {
+                const isExpanded = expandedRoomId === room.roomId;
+                const minOffer = room.offers.reduce((a, b) =>
+                  a.totalAmount <= b.totalAmount ? a : b
+                );
+                const roomMeta = details?.rooms?.find((r) => r.id === room.roomId);
+                const fromPrice =
+                  room.offers.length > 0
+                    ? `${minOffer.currency} ${minOffer.totalAmount.toFixed(0)}`
+                    : null;
+                return (
+                  <div
+                    key={room.roomId}
+                    className="rounded-2xl border border-slate-800 bg-slate-900/80 overflow-hidden"
+                  >
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setExpandedRoomId((id) => (id === room.roomId ? null : room.roomId))
+                      }
+                      className="w-full p-3 flex gap-2 text-left"
+                      aria-expanded={isExpanded}
+                    >
+                      <div className="w-20 h-20 rounded-xl overflow-hidden bg-slate-800 flex-shrink-0">
+                        {room.image ? (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (roomMeta?.photos?.length) {
+                                openRoomGallery(
+                                  room.roomId,
+                                  roomMeta.photos.findIndex((p) => p.url === room.image) >= 0
+                                    ? roomMeta.photos.findIndex((p) => p.url === room.image)
+                                    : 0
+                                );
+                              }
+                            }}
+                            className="block w-full h-full"
+                          >
+                            <img
+                              src={room.image}
+                              alt={room.roomName}
+                              className="w-full h-full object-cover"
+                            />
+                          </button>
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-[10px] text-slate-500">
+                            No photo
                           </div>
-                          <div className="text-right">
-                            <div className="text-xs font-semibold">
-                              {total.currency}{" "}
-                              {total.amount.toFixed(0)}
-                            </div>
-                            <div className="text-[10px] text-slate-400">
-                              {tax?.included
-                                ? "incl. taxes"
-                                : "+ taxes"}
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() => handleSelectOffer(offer)}
-                              className="mt-1 inline-flex items-center justify-center rounded-full bg-emerald-500 px-3 py-1 text-[11px] font-semibold text-slate-900 active:scale-[0.97]"
-                            >
-                              Select
-                            </button>
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0 flex flex-col justify-center">
+                        <h4 className="text-sm font-semibold leading-snug text-slate-50">
+                          {room.displayName}
+                        </h4>
+                        {fromPrice && (
+                          <p className="text-xs text-slate-400 mt-0.5">
+                            From {fromPrice} total
+                          </p>
+                        )}
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                          {room.offers.length} rate{room.offers.length !== 1 ? "s" : ""} available
+                        </p>
+                        <span
+                          className={`inline-block mt-1 text-[11px] font-medium text-emerald-400 ${isExpanded ? "rotate-180" : ""}`}
+                        >
+                          ▼
+                        </span>
+                      </div>
+                    </button>
+
+                    {isExpanded && (
+                      <div className="px-3 pb-3 pt-0 space-y-3 border-t border-slate-800">
+                        {roomMeta && (
+                          <div className="rounded-xl border border-slate-800 bg-slate-950/60 p-2.5 space-y-1.5 text-[11px] text-slate-300">
+                            <h5 className="text-xs font-semibold text-slate-200">
+                              Room details
+                            </h5>
+                            {(roomMeta.roomSizeSquare != null && roomMeta.roomSizeUnit) && (
+                              <p>
+                                Size: {roomMeta.roomSizeSquare} {roomMeta.roomSizeUnit}
+                              </p>
+                            )}
+                            {roomMeta.maxOccupancy != null && (
+                              <p>Max occupancy: {roomMeta.maxOccupancy} guests</p>
+                            )}
+                            {roomMeta.bedTypes && roomMeta.bedTypes.length > 0 && (
+                              <p>
+                                Beds:{" "}
+                                {roomMeta.bedTypes
+                                  .map(
+                                    (b) =>
+                                      `${b.quantity ?? 1} ${b.bedType ?? "Bed"}${b.bedSize ? ` (${b.bedSize})` : ""}`
+                                  )
+                                  .join(", ")}
+                              </p>
+                            )}
+                            {roomMeta.description && (
+                              <p className="text-slate-400 leading-snug">
+                                {roomMeta.description}
+                              </p>
+                            )}
+                            {roomMeta.roomAmenities && roomMeta.roomAmenities.length > 0 && (
+                              <p>
+                                Amenities:{" "}
+                                {roomMeta.roomAmenities
+                                  .map((a) => a.name)
+                                  .filter(Boolean)
+                                  .slice(0, 5)
+                                  .join(", ")}
+                              </p>
+                            )}
                           </div>
+                        )}
+
+                        <div className="space-y-2">
+                          {room.offers.map((offer) => {
+                            const perNight =
+                              nights > 0 ? offer.totalAmount / nights : offer.totalAmount;
+                            const hasPayAtProperty =
+                              offer.payAtPropertyAmount != null && offer.payAtPropertyAmount > 0;
+                            return (
+                              <div
+                                key={offer.offerId}
+                                className="rounded-xl border border-slate-800 bg-slate-950/60 p-2.5 flex items-center justify-between gap-2"
+                              >
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-xs font-medium text-slate-50">
+                                    {offer.boardName}
+                                  </p>
+                                  <p className="text-[11px] text-slate-400">
+                                    {offer.refundableTag === "NRF" ||
+                                    offer.refundableTag === "NRFN"
+                                      ? "Non-refundable"
+                                      : offer.cancelTime
+                                        ? `Free cancellation until ${offer.cancelTime}`
+                                        : "Flexible cancellation"}
+                                  </p>
+                                </div>
+                                <div className="text-right shrink-0">
+                                  <div className="text-sm font-semibold text-slate-50">
+                                    {offer.currency}{" "}
+                                    {perNight.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                                    <span className="font-normal text-slate-400 text-xs"> / night</span>
+                                  </div>
+                                  <div className="text-xs font-medium text-slate-200 mt-0.5">
+                                    {offer.currency}{" "}
+                                    {offer.totalAmount.toLocaleString(undefined, { maximumFractionDigits: 0 })}{" "}
+                                    Total
+                                  </div>
+                                  <div className="text-[11px] text-slate-400 mt-0.5">
+                                    {nights} {nights === 1 ? "night" : "nights"}
+                                    {occupancies.length > 1
+                                      ? `, ${occupancies.length} rooms`
+                                      : ", 1 room"}
+                                    {hasPayAtProperty ? (
+                                      <>
+                                        {" "}
+                                        (+{offer.currency}{" "}
+                                        {offer.payAtPropertyAmount!.toLocaleString(undefined, { maximumFractionDigits: 0 })}{" "}
+                                        taxes and fees)
+                                      </>
+                                    ) : (
+                                      <> · {offer.taxIncluded ? "incl. taxes & fees" : "+ taxes & fees"}</>
+                                    )}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleSelectOffer(offer)}
+                                    className="mt-1.5 inline-flex items-center justify-center rounded-full bg-emerald-500 px-3 py-1 text-[11px] font-semibold text-slate-900 active:scale-[0.97]"
+                                  >
+                                    Select
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
-                      );
-                    })}
+                      </div>
+                    )}
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </section>
         </div>
@@ -511,4 +671,3 @@ export default function HotelPage() {
     </main>
   );
 }
-

@@ -1,5 +1,7 @@
 "use client";
 
+import { useLocaleCurrency } from "@/context/LocaleCurrencyContext";
+import { DEFAULT_OCCUPANCIES, getNights, parseOccupanciesParam, serializeOccupancies, toApiOccupancies, totalGuests } from "@/lib/occupancy";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useState, Suspense, useRef } from "react";
@@ -36,6 +38,10 @@ interface SearchResponse {
     hotels?: LiteAPIHotel[];
   };
   pricesByHotelId: Record<string, PriceInfo>;
+  /** Per hotelId: true if the hotel has at least one refundable rate (any room/rate). */
+  hasRefundableRateByHotelId?: Record<string, boolean>;
+  /** Enriched from hotel details API (rates response doesn't include reviewCount). */
+  hotelDetailsByHotelId?: Record<string, { reviewCount?: number; rating?: number }>;
 }
 
 interface PlaceSuggestion {
@@ -74,9 +80,22 @@ function ResultsContent() {
   const aiSearchParam = searchParams.get("aiSearch");
   const checkinParam = searchParams.get("checkin") ?? "";
   const checkoutParam = searchParams.get("checkout") ?? "";
-  const adultsParam = Number(searchParams.get("adults") ?? "2");
+  const occupanciesParam = searchParams.get("occupancies");
+  const adultsLegacy = searchParams.get("adults");
+  const occupancies = useMemo(() => {
+    if (occupanciesParam) return parseOccupanciesParam(occupanciesParam);
+    const a = Number(adultsLegacy);
+    if (a >= 1) return [{ adults: a, children: [] }];
+    return parseOccupanciesParam(null);
+  }, [occupanciesParam, adultsLegacy]);
+  const effectiveOccupanciesParam =
+    occupanciesParam ??
+    (adultsLegacy ? `${adultsLegacy}` : serializeOccupancies(DEFAULT_OCCUPANCIES));
+  const guestsCount = totalGuests(occupancies);
+  const nights = getNights(checkinParam, checkoutParam);
 
   const router = useRouter();
+  const { currency, locale } = useLocaleCurrency();
   const [data, setData] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -88,7 +107,7 @@ function ResultsContent() {
   const [globalSearchQuery, setGlobalSearchQuery] = useState("");
   const [globalSearchCheckin, setGlobalSearchCheckin] = useState(checkinParam);
   const [globalSearchCheckout, setGlobalSearchCheckout] = useState(checkoutParam);
-  const [globalSearchAdults, setGlobalSearchAdults] = useState(adultsParam);
+  const [globalSearchOccupanciesParam, setGlobalSearchOccupanciesParam] = useState("");
 
   // Autocomplete state
   const [suggestions, setSuggestions] = useState<PlaceSuggestion[]>([]);
@@ -101,7 +120,7 @@ function ResultsContent() {
   useEffect(() => {
     setGlobalSearchCheckin(checkinParam);
     setGlobalSearchCheckout(checkoutParam);
-    setGlobalSearchAdults(adultsParam);
+    setGlobalSearchOccupanciesParam(effectiveOccupanciesParam);
 
     // Initialize query logic
     const initialQuery = mode === "place" ? (placeNameParam ?? "") : (aiSearchParam ?? "");
@@ -117,9 +136,9 @@ function ResultsContent() {
     }
 
     setVisibleCount(INITIAL_BATCH);
-  }, [mode, placeIdParam, placeNameParam, aiSearchParam, checkinParam, checkoutParam, adultsParam]);
+  }, [mode, placeIdParam, placeNameParam, aiSearchParam, checkinParam, checkoutParam, effectiveOccupanciesParam]);
 
-  // Fetch results
+  // Fetch results (refetches when currency changes so list reloads with new prices)
   useEffect(() => {
     async function run() {
       try {
@@ -128,13 +147,16 @@ function ResultsContent() {
         const res = await fetch("/api/rates/search", {
           method: "POST",
           headers: { "content-type": "application/json" },
+          credentials: "include",
           body: JSON.stringify({
             mode,
             placeId: placeIdParam,
             aiSearch: aiSearchParam,
             checkin: checkinParam,
             checkout: checkoutParam,
-            adults: adultsParam
+            occupancies: toApiOccupancies(occupancies),
+            currency,
+            language: locale
           })
         });
         const json = await res.json();
@@ -150,7 +172,7 @@ function ResultsContent() {
     }
 
     run();
-  }, [mode, placeIdParam, aiSearchParam, checkinParam, checkoutParam, adultsParam]);
+  }, [mode, placeIdParam, aiSearchParam, checkinParam, checkoutParam, occupancies, currency, locale]);
 
   // Places autocomplete effect
   useEffect(() => {
@@ -174,10 +196,12 @@ function ResultsContent() {
       try {
         setLoadingPlaces(true);
         setPlacesError(null);
-        const res = await fetch(
-          `/api/places?q=${encodeURIComponent(globalSearchQuery.trim())}`,
-          { signal: controller.signal }
-        );
+        const params = new URLSearchParams({ q: globalSearchQuery.trim() });
+        if (locale) params.set("language", locale);
+        const res = await fetch(`/api/places?${params.toString()}`, {
+          credentials: "include",
+          signal: controller.signal
+        });
         if (!res.ok) throw new Error("Failed to load places");
 
         const json = await res.json();
@@ -201,15 +225,27 @@ function ResultsContent() {
       controller.abort();
       clearTimeout(timeout);
     };
-  }, [globalSearchQuery, selectedPlaceName]);
+  }, [globalSearchQuery, selectedPlaceName, locale]);
 
-  const allHotels: LiteAPIHotel[] =
-    data?.raw?.hotels ??
-    (Array.isArray(data?.raw?.data)
-      ? data!.raw.data
-        .map((item: any) => item.hotel)
-        .filter(Boolean)
-      : []);
+  const allHotels: LiteAPIHotel[] = useMemo(() => {
+    const raw = data?.raw?.hotels ??
+      (Array.isArray(data?.raw?.data)
+        ? data!.raw.data
+          .map((item: any) => item.hotel)
+          .filter(Boolean)
+        : []);
+    const detailsByHotelId = data?.hotelDetailsByHotelId ?? {};
+    return (raw as any[]).map((h: any) => {
+      const id = h?.id ?? h?.hotelId;
+      const details = id ? detailsByHotelId[id] : undefined;
+      return {
+        ...h,
+        id,
+        reviewCount: h?.reviewCount ?? h?.review_count ?? details?.reviewCount ?? undefined,
+        rating: h?.rating ?? details?.rating ?? undefined
+      };
+    });
+  }, [data?.raw?.hotels, data?.raw?.data, data?.hotelDetailsByHotelId]);
 
   const sortedHotels = useMemo(() => {
     const list = [...allHotels];
@@ -286,7 +322,7 @@ function ResultsContent() {
 
     params.set("checkin", globalSearchCheckin);
     params.set("checkout", globalSearchCheckout);
-    params.set("adults", String(globalSearchAdults));
+    if (globalSearchOccupanciesParam) params.set("occupancies", globalSearchOccupanciesParam);
     router.push(`/results?${params.toString()}`);
     setSuggestions([]); // close dropdown
   };
@@ -314,8 +350,8 @@ function ResultsContent() {
             {title}
           </h1>
           <p className="text-[11px] text-slate-400">
-            {checkinParam} → {checkoutParam} · {adultsParam}{" "}
-            {adultsParam === 1 ? "guest" : "guests"}
+            {checkinParam} → {checkoutParam} · {guestsCount}{" "}
+            {guestsCount === 1 ? "guest" : "guests"}
           </p>
         </div>
       </header>
@@ -387,13 +423,9 @@ function ResultsContent() {
               onChange={(e) => setGlobalSearchCheckout(e.target.value)}
               className="rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-50 [color-scheme:dark]"
             />
-            <input
-              type="number"
-              min={1}
-              value={globalSearchAdults}
-              onChange={(e) => setGlobalSearchAdults(Number(e.target.value) || 1)}
-              className="w-14 rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-50"
-            />
+            <span className="text-xs text-slate-400 py-1.5">
+              {occupancies.length} {occupancies.length === 1 ? "room" : "rooms"} · {guestsCount} guests
+            </span>
             <button
               type="submit"
               className="rounded-lg bg-emerald-500 text-slate-900 text-xs font-semibold px-3 py-1.5"
@@ -479,33 +511,34 @@ function ResultsContent() {
             if (aiSearchParam) hrefParams.set("aiSearch", aiSearchParam);
             hrefParams.set("checkin", checkinParam);
             hrefParams.set("checkout", checkoutParam);
-            hrefParams.set("adults", String(adultsParam));
+            if (effectiveOccupanciesParam) hrefParams.set("occupancies", effectiveOccupanciesParam);
             const hrefParamsStr = hrefParams.toString();
 
+            const hasAnyRefundable = data?.hasRefundableRateByHotelId?.[hotel.id];
             return (
               <Link
                 key={hotel.id}
                 href={`/hotel/${hotel.id}?${hrefParamsStr}`}
-                className="block rounded-2xl border border-slate-800 bg-slate-900/70 p-3 shadow-lg shadow-slate-950/40"
+                className="block rounded-2xl border border-slate-800 bg-slate-900/70 overflow-hidden shadow-lg shadow-slate-950/40"
               >
-                <div className="flex gap-3">
-                  <div className="w-24 h-24 rounded-xl overflow-hidden bg-slate-800 flex-shrink-0">
+                <div className="flex min-h-[140px]">
+                  <div className="w-36 min-w-[140px] flex-shrink-0 overflow-hidden bg-slate-800">
                     {hotel.main_photo ? (
                       <img
                         src={hotel.main_photo}
                         alt={hotel.name}
-                        className="w-full h-full object-cover"
+                        className="w-full h-full min-h-[140px] object-cover"
                         loading="lazy"
                       />
                     ) : (
-                      <div className="w-full h-full flex items-center justify-center text-[10px] text-slate-500">
+                      <div className="w-full h-full min-h-[140px] flex items-center justify-center text-[10px] text-slate-500">
                         No photo
                       </div>
                     )}
                   </div>
-                  <div className="flex-1 flex flex-col justify-between gap-1">
+                  <div className="flex-1 flex flex-col justify-between gap-1 p-3 min-w-0">
                     <div>
-                      <h2 className="text-sm font-semibold leading-snug">
+                      <h2 className="text-sm font-semibold leading-snug text-slate-50">
                         {hotel.name}
                       </h2>
                       {hotel.address && (
@@ -514,45 +547,67 @@ function ResultsContent() {
                         </p>
                       )}
                       {(hotel.rating != null || hotel.reviewCount != null) && (
-                        <p className="mt-1 inline-flex items-center gap-1 rounded-full bg-slate-800 px-2 py-0.5 text-[11px] text-emerald-300">
+                        <p className="mt-1 inline-flex flex-wrap items-center gap-1.5 text-[11px]">
                           {hotel.rating != null && (
-                            <>
-                              ★ <span className="font-medium">{hotel.rating.toFixed(1)}</span>
-                            </>
+                            <span className="rounded bg-emerald-500/20 px-1.5 py-0.5 font-medium text-emerald-300">
+                              {hotel.rating.toFixed(1)}
+                            </span>
                           )}
-                          {hotel.reviewCount != null && (
+                          {hotel.reviewCount != null ? (
                             <span className="text-slate-400">
                               {hotel.reviewCount.toLocaleString()} reviews
                             </span>
-                          )}
-                          {hotel.reviewCount == null && hotel.rating != null && (
-                            <span className="text-slate-400">— reviews</span>
-                          )}
+                          ) : hotel.rating != null ? (
+                            <span className="text-slate-400">reviews</span>
+                          ) : null}
                           {hotel.persona && (
-                            <span className="text-slate-400">
-                              · {hotel.persona}
-                            </span>
+                            <span className="text-slate-400">· {hotel.persona}</span>
                           )}
                         </p>
                       )}
-                    </div>
-                    {price && (
-                      <div className="flex items-baseline justify-between mt-2">
-                        <div className="text-xs text-slate-400">
-                          {price.refundableTag === "NRF" ||
-                            price.refundableTag === "NRFN"
+                      {/* Refundability: one tag in same section (green Refundable / red Non-refundable / neutral Free cancellation) */}
+                      {hasAnyRefundable ? (
+                        <p className="mt-1 text-[11px] font-medium text-emerald-400">
+                          Refundable
+                        </p>
+                      ) : price ? (
+                        <p
+                          className={
+                            price.refundableTag === "NRF" || price.refundableTag === "NRFN"
+                              ? "mt-1 text-[11px] font-medium text-red-400"
+                              : "mt-1 text-[11px] font-medium text-slate-400"
+                          }
+                        >
+                          {price.refundableTag === "NRF" || price.refundableTag === "NRFN"
                             ? "Non-refundable"
                             : "Free cancellation (see details)"}
-                        </div>
-                        <div className="text-right">
-                          <div className="text-sm font-semibold">
-                            {price.currency}{" "}
-                            {price.amount.toFixed(0)}
+                        </p>
+                      ) : null}
+                    </div>
+                    {price && (
+                      <div className="flex items-baseline justify-between mt-2 gap-2">
+                        <div className="text-xs text-slate-400 min-w-0" />
+                        <div className="text-right shrink-0">
+                          <div className="text-base font-semibold text-slate-50">
+                            {price.currency}
+                            {nights > 0
+                              ? (price.amount / nights).toLocaleString(undefined, { maximumFractionDigits: 0 })
+                              : price.amount.toFixed(0)}
+                            <span className="font-normal text-slate-400 text-sm"> / night</span>
                           </div>
-                          <div className="text-[11px] text-slate-400">
-                            {price.taxIncluded
-                              ? "incl. taxes & fees"
-                              : "+ taxes & fees"}
+                          {nights > 0 && (
+                            <div className="text-sm font-medium text-slate-200 mt-0.5">
+                              {price.currency}
+                              {price.amount.toLocaleString(undefined, { maximumFractionDigits: 0 })}{" "}
+                              Total
+                            </div>
+                          )}
+                          <div className="text-[11px] text-slate-400 mt-0.5">
+                            {nights} {nights === 1 ? "night" : "nights"}
+                            {", "}
+                            {occupancies.length} {occupancies.length === 1 ? "room" : "rooms"}
+                            {", "}
+                            {price.taxIncluded ? "incl. taxes & fees" : "+ taxes & fees"}
                           </div>
                         </div>
                       </div>
@@ -561,7 +616,7 @@ function ResultsContent() {
                 </div>
 
                 {hotel.tags && hotel.tags.length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-1">
+                  <div className="px-3 pb-3 pt-0 flex flex-wrap gap-1">
                     {hotel.tags.slice(0, 3).map((tag) => (
                       <span
                         key={tag}

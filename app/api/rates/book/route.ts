@@ -1,5 +1,7 @@
-import { NextRequest, NextResponse } from "next/server";
+import { getChannelFromRequest } from "@/auth";
+import { getLiteApiKeyForChannel } from "@/lib/channel-keys";
 import { bookRate } from "@/lib/liteapi";
+import { NextRequest, NextResponse } from "next/server";
 
 export async function POST(req: NextRequest) {
   let body: any = {};
@@ -25,7 +27,9 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const resp = await bookRate(body);
+    const channel = getChannelFromRequest(req);
+    const apiKey = getLiteApiKeyForChannel(channel);
+    const resp = await bookRate(body, apiKey);
     return NextResponse.json(resp);
   } catch (err: any) {
     return NextResponse.json(
