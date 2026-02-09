@@ -1,7 +1,7 @@
 import { getChannelFromRequest } from "@/auth";
 import { getLiteApiKeyForChannel } from "@/lib/channel-keys";
 import { getMarginForRequest } from "@/lib/margin-resolver";
-import { getHotelRatesForHotel } from "@/lib/liteapi";
+import { getHotelRatesForHotel, resolveGuestNationality } from "@/lib/liteapi";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function POST(req: NextRequest) {
@@ -28,13 +28,17 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const CHILD_AGE_MIN = 0;
+  const CHILD_AGE_MAX = 17;
   const occupancies = Array.isArray(rawOccupancies) && rawOccupancies.length > 0
     ? rawOccupancies
         .filter((o: any) => o && typeof o.adults === "number" && o.adults >= 1)
-        .map((o: any) => ({
-          adults: o.adults,
-          children: Array.isArray(o.children) ? o.children.filter((a: any) => typeof a === "number") : []
-        }))
+        .map((o: any) => {
+          const rawChildren = Array.isArray(o.children) ? o.children : [];
+          const children = rawChildren
+            .filter((a: any) => typeof a === "number" && !Number.isNaN(a) && a >= CHILD_AGE_MIN && a <= CHILD_AGE_MAX);
+          return { adults: o.adults, children };
+        })
     : [{ adults: typeof legacyAdults === "number" && legacyAdults >= 1 ? legacyAdults : 2, children: [] }];
 
   if (occupancies.length === 0) {
@@ -51,6 +55,7 @@ export async function POST(req: NextRequest) {
     const marginValue = marginResult.margin ?? null;
     const additionalMarkupValue = marginResult.additionalMarkup ?? null;
 
+    const guestNationalityResolved = resolveGuestNationality(guestNationality);
     const resp = await getHotelRatesForHotel(
       {
         hotelId,
@@ -58,7 +63,7 @@ export async function POST(req: NextRequest) {
         checkout,
         occupancies,
         currency,
-        guestNationality,
+        guestNationality: guestNationalityResolved,
         language,
         ...(marginValue != null && { margin: marginValue }),
         ...(additionalMarkupValue != null && { additionalMarkup: additionalMarkupValue })

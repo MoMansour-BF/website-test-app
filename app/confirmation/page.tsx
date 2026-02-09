@@ -9,6 +9,13 @@ interface GuestDetails {
   firstName: string;
   lastName: string;
   email: string;
+  phone?: string;
+}
+
+const GUEST_STORAGE_VERSION = 2;
+interface StoredGuestPayload {
+  version: number;
+  guests: GuestDetails[];
 }
 
 interface BookingResponse {
@@ -62,35 +69,62 @@ function ConfirmationContent() {
   );
   const guestsCount = totalGuests(occupancies);
 
-  const [guest, setGuest] = useState<GuestDetails | null>(null);
+  const [guestsForBook, setGuestsForBook] = useState<GuestDetails[] | null>(null);
   const [booking, setBooking] = useState<BookingResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Load guest details from storage
+  // Load guest details from storage (Phase 3: per-room or legacy single)
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
       const stored = window.localStorage.getItem(GUEST_STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored) as GuestDetails;
-        setGuest(parsed);
+      if (!stored) return;
+      const parsed = JSON.parse(stored);
+      const roomCount = Math.max(1, occupancies.length);
+      if (parsed?.version === GUEST_STORAGE_VERSION && Array.isArray(parsed?.guests)) {
+        const guests = (parsed as StoredGuestPayload).guests;
+        if (guests.length >= roomCount) {
+          setGuestsForBook(guests.slice(0, roomCount));
+        } else if (guests.length > 0) {
+          const filled = guests.slice(0, roomCount);
+          while (filled.length < roomCount) {
+            filled.push(filled[0]);
+          }
+          setGuestsForBook(filled);
+        }
+      } else if (parsed?.firstName != null || parsed?.email != null) {
+        const single = parsed as GuestDetails;
+        setGuestsForBook(
+          Array.from({ length: roomCount }, () => ({
+            firstName: single.firstName ?? "",
+            lastName: single.lastName ?? "",
+            email: single.email ?? ""
+          }))
+        );
       }
     } catch {
       // ignore
     }
-  }, []);
+  }, [occupancies.length]);
 
   // Call book endpoint once guest details are available
   useEffect(() => {
-    if (!guest) return;
+    if (!guestsForBook || guestsForBook.length === 0) return;
     if (!prebookId || !transactionId) {
       setError("Missing payment information. Please try booking again.");
       setLoading(false);
       return;
     }
 
-    const guestData = guest;
+    const holder = guestsForBook[0];
+    const roomCount = Math.max(1, occupancies.length);
+    const guestsPayload = guestsForBook.slice(0, roomCount).map((g, i) => ({
+      occupancyNumber: i + 1,
+      firstName: g.firstName,
+      lastName: g.lastName,
+      email: g.email
+    }));
 
     async function run() {
       try {
@@ -102,26 +136,26 @@ function ConfirmationContent() {
           credentials: "include",
           body: JSON.stringify({
             prebookId,
-            holder: guestData,
+            holder: {
+              firstName: holder.firstName,
+              lastName: holder.lastName,
+              email: holder.email
+            },
             payment: {
               method: "TRANSACTION_ID",
               transactionId
             },
-            guests: occupancies.length > 0
-              ? occupancies.map((_, i) => ({
-                  occupancyNumber: i + 1,
-                  firstName: guestData.firstName,
-                  lastName: guestData.lastName,
-                  email: guestData.email
-                }))
-              : [
-                  {
-                    occupancyNumber: 1,
-                    firstName: guestData.firstName,
-                    lastName: guestData.lastName,
-                    email: guestData.email
-                  }
-                ]
+            guests:
+              guestsPayload.length > 0
+                ? guestsPayload
+                : [
+                    {
+                      occupancyNumber: 1,
+                      firstName: holder.firstName,
+                      lastName: holder.lastName,
+                      email: holder.email
+                    }
+                  ]
           })
         });
         const json = await res.json();
@@ -139,7 +173,7 @@ function ConfirmationContent() {
     }
 
     run();
-  }, [guest, prebookId, transactionId, occupancies]);
+  }, [guestsForBook, prebookId, transactionId, occupancies.length]);
 
   const policy = booking?.data?.cancellationPolicies;
   const cancelInfo = policy?.cancelPolicyInfos?.[0]?.cancelTime;

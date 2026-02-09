@@ -6,12 +6,15 @@ interface ImageGalleryProps {
   images: { url: string }[];
   initialIndex?: number;
   onClose: () => void;
+  /** Optional class for the overlay (e.g. z-[60] when opening from a sheet). */
+  overlayClassName?: string;
 }
 
 export function ImageGallery({
   images,
   initialIndex = 0,
-  onClose
+  onClose,
+  overlayClassName
 }: ImageGalleryProps) {
   const [index, setIndex] = useState(initialIndex);
   const current = images[index];
@@ -38,7 +41,8 @@ export function ImageGallery({
 
   return (
     <div
-      className="fixed inset-0 z-30 bg-slate-950 flex flex-col"
+      className={`fixed inset-0 z-30 flex flex-col ${overlayClassName ?? ""}`}
+      style={{ backgroundColor: "var(--dark-text)" }}
       role="dialog"
       aria-modal="true"
       aria-label="Image gallery"
@@ -46,7 +50,7 @@ export function ImageGallery({
       <button
         type="button"
         onClick={onClose}
-        className="absolute top-4 right-4 z-10 h-10 w-10 rounded-full bg-slate-800/90 text-slate-200 flex items-center justify-center text-lg"
+        className="absolute top-4 right-4 z-10 h-10 w-10 rounded-full border border-[var(--sky-blue)] flex items-center justify-center text-lg bg-white/95 text-[var(--dark-text)]"
         aria-label="Close gallery"
       >
         ×
@@ -59,7 +63,7 @@ export function ImageGallery({
         <button
           type="button"
           onClick={goPrev}
-          className="absolute left-2 top-1/2 -translate-y-1/2 z-10 h-10 w-10 rounded-full bg-slate-800/90 text-slate-200 flex items-center justify-center text-xl"
+          className="absolute left-2 top-1/2 -translate-y-1/2 z-10 h-10 w-10 rounded-full border border-[var(--sky-blue)] flex items-center justify-center text-xl bg-white/95 text-[var(--dark-text)]"
           aria-label="Previous image"
         >
           ‹
@@ -78,14 +82,14 @@ export function ImageGallery({
         <button
           type="button"
           onClick={goNext}
-          className="absolute right-2 top-1/2 -translate-y-1/2 z-10 h-10 w-10 rounded-full bg-slate-800/90 text-slate-200 flex items-center justify-center text-xl"
+          className="absolute right-2 top-1/2 -translate-y-1/2 z-10 h-10 w-10 rounded-full border border-[var(--sky-blue)] flex items-center justify-center text-xl bg-white/95 text-[var(--dark-text)]"
           aria-label="Next image"
         >
           ›
         </button>
       </div>
 
-      <div className="py-2 text-center text-xs text-slate-400">
+      <div className="py-2 text-center text-xs text-[var(--muted-foreground)]">
         {index + 1} / {images.length}
       </div>
     </div>

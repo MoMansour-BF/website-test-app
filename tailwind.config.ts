@@ -6,7 +6,11 @@ const config: Config = {
     "./src/**/*.{js,ts,jsx,tsx}"
   ],
   theme: {
-    extend: {}
+    extend: {
+      fontFamily: {
+        sans: ["var(--font-outfit)", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "sans-serif"],
+      },
+    },
   },
   plugins: []
 };

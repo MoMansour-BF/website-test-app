@@ -20,9 +20,10 @@ export async function GET(req: NextRequest) {
     const apiKey = getLiteApiKeyForChannel(channel);
     const resp = await getHotelDetails(hotelId, language, apiKey);
     return NextResponse.json(resp);
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Failed to fetch hotel details";
     return NextResponse.json(
-      { error: { message: err.message ?? "Failed to fetch hotel details" } },
+      { error: { message } },
       { status: 500 }
     );
   }

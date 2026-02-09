@@ -92,6 +92,21 @@ export async function getPlaces(
 
 export type RatesSearchMode = "place" | "vibe";
 
+/** Default guest nationality for rates (Phase 0: EG for Egyptian market). All rates calls must use the same guestNationality for a given search. */
+export const DEFAULT_GUEST_NATIONALITY = "EG";
+
+/** ISO 3166-1 alpha-2: exactly 2 uppercase A–Z letters. */
+const ALPHA2_REGEX = /^[A-Z]{2}$/;
+
+/**
+ * Resolves guestNationality for LiteAPI: valid alpha-2 or default EG.
+ * Use this in all rates endpoints (search, hotel, stream, non-stream) so the same search uses one nationality.
+ */
+export function resolveGuestNationality(value: string | undefined): string {
+  const normalized = typeof value === "string" ? value.trim().toUpperCase() : "";
+  return ALPHA2_REGEX.test(normalized) ? normalized : DEFAULT_GUEST_NATIONALITY;
+}
+
 /** One room: adults + child ages (integers) for API */
 export type OccupancyInput = { adults: number; children?: number[] };
 
@@ -115,31 +130,53 @@ export interface RatesSearchParams {
   refundableRatesOnly?: boolean;
   /** Number of room rates per hotel, sorted by price (cheapest first). 1 = cheapest only. */
   maxRatesPerHotel?: number;
+  /** Phase 5: when true, LiteAPI returns SSE stream. Used by streaming search path. */
+  stream?: boolean;
+  /** Phase 5 Type 1: target a specific hotel by name (from place displayName). */
+  hotelName?: string;
+  /** Phase 5: quality filters for Type 2 / Type 1 area call. e.g. [3,4,5]. Omit for vibe (Type 3). */
+  starRating?: number[];
+  /** Phase 5: minimum guest rating (e.g. 6.5). Omit for Type 3. */
+  minRating?: number;
+  /** Phase 7: minimum number of reviews (LiteAPI minReviewsCount). */
+  minReviewsCount?: number;
+  /** Phase 7: facility IDs to filter by (LiteAPI facilities). */
+  facilities?: number[];
+  /** Phase 7: when true, hotel must have all specified facilities. */
+  strictFacilityFiltering?: boolean;
 }
 
-export async function searchHotelRates(
-  params: RatesSearchParams,
-  apiKey?: string
-) {
+/**
+ * Build the request body for POST /hotels/rates (shared by non-stream and stream).
+ * Used by searchHotelRates and fetchHotelRatesStream.
+ */
+export function buildRatesRequestBody(params: RatesSearchParams): Record<string, unknown> {
   const {
     mode,
     placeId,
     aiSearch,
+    hotelName,
     checkin,
     checkout,
     occupancies,
     currency = "USD",
-    guestNationality = "US",
+    guestNationality = DEFAULT_GUEST_NATIONALITY,
     language,
     limit,
     timeout,
     margin,
     additionalMarkup,
     refundableRatesOnly,
-    maxRatesPerHotel
+    maxRatesPerHotel,
+    stream,
+    starRating,
+    minRating,
+    minReviewsCount,
+    facilities,
+    strictFacilityFiltering
   } = params;
 
-  const body: any = {
+  const body: Record<string, unknown> = {
     occupancies: occupancies.map((o) => ({
       adults: o.adults,
       ...(o.children && o.children.length > 0 ? { children: o.children } : {})
@@ -159,6 +196,13 @@ export async function searchHotelRates(
   if (additionalMarkup != null && typeof additionalMarkup === "number") body.additionalMarkup = additionalMarkup;
   if (refundableRatesOnly === true) body.refundableRatesOnly = true;
   if (maxRatesPerHotel != null && typeof maxRatesPerHotel === "number") body.maxRatesPerHotel = maxRatesPerHotel;
+  if (stream === true) body.stream = true;
+  if (hotelName != null && hotelName.trim() !== "") body.hotelName = hotelName.trim();
+  if (starRating != null && Array.isArray(starRating) && starRating.length > 0) body.starRating = starRating;
+  if (minRating != null && typeof minRating === "number" && !Number.isNaN(minRating)) body.minRating = minRating;
+  if (minReviewsCount != null && typeof minReviewsCount === "number" && !Number.isNaN(minReviewsCount) && minReviewsCount >= 0) body.minReviewsCount = minReviewsCount;
+  if (facilities != null && Array.isArray(facilities) && facilities.length > 0) body.facilities = facilities;
+  if (strictFacilityFiltering === true) body.strictFacilityFiltering = true;
 
   if (mode === "place" && placeId) {
     body.placeId = placeId;
@@ -166,7 +210,43 @@ export async function searchHotelRates(
     body.aiSearch = aiSearch;
   }
 
+  return body;
+}
+
+export async function searchHotelRates(
+  params: RatesSearchParams,
+  apiKey?: string
+) {
+  const body = buildRatesRequestBody(params);
   return request<any>("api", "/hotels/rates", "POST", { body, apiKey });
+}
+
+/**
+ * Phase 5: Fetch LiteAPI /hotels/rates with stream: true.
+ * Returns the raw Response so the caller can pipe response.body and append extra SSE events (e.g. refundable).
+ * Caller must pass AbortSignal for cancellation.
+ */
+export function fetchHotelRatesStream(
+  params: RatesSearchParams,
+  apiKey: string,
+  signal?: AbortSignal
+): Promise<Response> {
+  const body = buildRatesRequestBody({ ...params, stream: true });
+  const apiKeyResolved = apiKey ?? process.env.LITEAPI_API_KEY ?? null;
+  if (!apiKeyResolved) {
+    return Promise.reject(new Error("LITEAPI_API_KEY (or apiKey) is not set"));
+  }
+  return fetch(`${API_BASE}/hotels/rates`, {
+    method: "POST",
+    headers: {
+      "X-API-Key": apiKeyResolved,
+      "Content-Type": "application/json",
+      Accept: "text/event-stream"
+    },
+    body: JSON.stringify(body),
+    signal,
+    cache: "no-store"
+  });
 }
 
 export async function getHotelRatesForHotel(params: {
@@ -190,7 +270,7 @@ export async function getHotelRatesForHotel(params: {
     checkout,
     occupancies,
     currency = "USD",
-    guestNationality = "US",
+    guestNationality = DEFAULT_GUEST_NATIONALITY,
     language,
     margin,
     additionalMarkup
@@ -217,6 +297,57 @@ export async function getHotelRatesForHotel(params: {
   return request<any>("api", "/hotels/rates", "POST", { body, apiKey });
 }
 
+/** Phase 4: canonical hotel details from /data/hotel (LiteAPI Displaying Essential Hotel Details). */
+export interface HotelDetailsData {
+  rating?: number;
+  reviewCount?: number;
+  starRating?: number;
+}
+
+const HOTEL_DETAILS_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const hotelDetailsCache = new Map<
+  string,
+  { at: number; value: HotelDetailsData }
+>();
+
+function cacheKey(hotelId: string, language?: string): string {
+  return `${hotelId}:${language ?? ""}`;
+}
+
+/**
+ * Phase 4: Extract canonical hotel details from API response. Prefer data.rating,
+ * data.reviewCount, data.starRating; keep snake_case/alternate fallbacks.
+ */
+export function extractHotelDetailsFromResponse(data: any): HotelDetailsData | null {
+  if (!data || typeof data !== "object") return null;
+  const rating = data.rating;
+  const reviewCount =
+    data.reviewCount ??
+    data.review_count ??
+    data.reviewsCount ??
+    data.numberOfReviews;
+  const starRating =
+    data.starRating ??
+    data.star_rating ??
+    data.star_rating_number;
+  const numRating = rating != null ? Number(rating) : undefined;
+  const numReviewCount = reviewCount != null ? Number(reviewCount) : undefined;
+  const numStarRating = starRating != null ? Number(starRating) : undefined;
+  if (
+    numRating == null &&
+    numReviewCount == null &&
+    numStarRating == null
+  )
+    return null;
+  const out: HotelDetailsData = {};
+  if (numRating != null && !Number.isNaN(numRating)) out.rating = numRating;
+  if (numReviewCount != null && !Number.isNaN(numReviewCount))
+    out.reviewCount = numReviewCount;
+  if (numStarRating != null && !Number.isNaN(numStarRating))
+    out.starRating = numStarRating;
+  return out;
+}
+
 export async function getHotelDetails(
   hotelId: string,
   language?: string,
@@ -231,6 +362,36 @@ export async function getHotelDetails(
     searchParams: params,
     apiKey
   });
+}
+
+/**
+ * Phase 4: getHotelDetails with server-side cache (hotelId + language, TTL 1h).
+ * Use in search route and batch details endpoint.
+ */
+export async function getCachedHotelDetails(
+  hotelId: string,
+  language: string | undefined,
+  apiKey: string | undefined
+): Promise<HotelDetailsData | null> {
+  const key = cacheKey(hotelId, language);
+  const now = Date.now();
+  const hit = hotelDetailsCache.get(key);
+  if (hit && now - hit.at < HOTEL_DETAILS_CACHE_TTL_MS) {
+    return hit.value;
+  }
+  try {
+    const resp = await getHotelDetails(hotelId, language, apiKey);
+    const data = resp?.data ?? resp;
+    const extracted = extractHotelDetailsFromResponse(data);
+    if (extracted) {
+      hotelDetailsCache.set(key, { at: now, value: extracted });
+      return extracted;
+    }
+    hotelDetailsCache.set(key, { at: now, value: {} });
+    return {};
+  } catch {
+    return null;
+  }
 }
 
 export async function prebookRate(

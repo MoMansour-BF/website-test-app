@@ -16,6 +16,7 @@ export async function GET(req: NextRequest) {
     const channel = getChannelFromRequest(req);
     const apiKey = getLiteApiKeyForChannel(channel);
     const resp = await getPlaces(q.trim(), language, apiKey);
+    // Pass through full LiteAPI response including data[].types (Phase 1: place types for search-type and icons).
     return NextResponse.json(resp);
   } catch (err: any) {
     const status = typeof err?.status === "number" ? err.status : 500;

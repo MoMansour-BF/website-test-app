@@ -42,16 +42,27 @@ export function parseOccupanciesParam(value: string | null): Occupancy[] {
 /**
  * Serialize occupancies for URL.
  * Format: "adults[,age1,age2,...]|adults|..." (no trailing pipe)
+ * Child ages outside 0–17 (e.g. -1 for "not selected") are omitted.
  */
 export function serializeOccupancies(occupancies: Occupancy[]): string {
   return occupancies
     .slice(0, MAX_ROOMS)
     .map((o) => {
       const parts = [String(o.adults)];
-      if (o.children.length) parts.push(...o.children.map(String));
+      const validAges = o.children.filter(
+        (a) => !Number.isNaN(a) && a >= CHILD_AGE_MIN && a <= CHILD_AGE_MAX
+      );
+      if (validAges.length) parts.push(...validAges.map(String));
       return parts.join(",");
     })
     .join("|");
+}
+
+/** True if any room has a child with age not yet selected (e.g. -1). Use to disable search until all child ages are set. */
+export function hasUnsetChildAges(occupancies: Occupancy[]): boolean {
+  return occupancies.some((o) =>
+    o.children.some((a) => Number.isNaN(a) || a < CHILD_AGE_MIN || a > CHILD_AGE_MAX)
+  );
 }
 
 export function totalAdults(occupancies: Occupancy[]): number {
@@ -66,12 +77,17 @@ export function totalGuests(occupancies: Occupancy[]): number {
   return totalAdults(occupancies) + totalChildren(occupancies);
 }
 
-/** Build API occupancies: each room { adults, children } (children = array of ages) */
+/** Build API occupancies: each room { adults, children } (children = array of ages 0–17 only; invalid/unset ages are omitted) */
 export function toApiOccupancies(occupancies: Occupancy[]): { adults: number; children?: number[] }[] {
-  return occupancies.map((o) => ({
-    adults: o.adults,
-    ...(o.children.length > 0 ? { children: o.children } : {})
-  }));
+  return occupancies.map((o) => {
+    const validAges = (o.children ?? []).filter(
+      (a) => !Number.isNaN(a) && a >= CHILD_AGE_MIN && a <= CHILD_AGE_MAX
+    );
+    return {
+      adults: o.adults,
+      ...(validAges.length > 0 ? { children: validAges } : {})
+    };
+  });
 }
 
 /** Number of nights between check-in and check-out (yyyy-mm-dd). */

@@ -1,6 +1,318 @@
 @import "tailwindcss";
 
-body {
-  -webkit-font-smoothing: antialiased;
+/* Brand font: Outfit loaded via next/font in app/layout.tsx (variable: --font-outfit) */
+
+/* Topography background pattern – set your image URL here */
+:root {
+  --topography-pattern-url: url("/topography.svg"); /* e.g. url("https://yoursite.com/topography.svg") or url("/topography.svg") */
 }
 
+/* Journeys by Breadfast – design tokens (light mode default) */
+:root {
+  --primary: #057A5A;
+  --primary-hover: #046349;
+  --dark-text: #20373A;
+  --light-bg: #F6F6F6;
+  --ocean-blue: #4EABBB;
+  --sky-blue: #ABC5D1;
+  --muted: #E5E7EB;
+  --muted-foreground: #6B7280;
+  --radius: 0.75rem;
+  /* Star rating display (amber/gold per design) */
+  --star: #D97706;
+  /* Phase 6: transition durations (overridden in prefers-reduced-motion) */
+  --modal-enter-duration: 250ms;
+  --modal-exit-duration: 220ms;
+  --view-transition-duration: 220ms;
+  --expand-duration: 180ms;
+  --list-stagger-delay: 35ms;
+}
+
+/* Brand typography: Outfit (via Tailwind font-sans) with system fallbacks */
+body {
+  font-family: var(--font-outfit), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  background-color: var(--light-bg);
+  color: var(--dark-text);
+}
+
+/* App-wide topography background (mobile-first: scroll, 400px tile, 0.3 opacity via pseudo-element) */
+.topography-bg {
+  position: relative;
+  min-height: 100vh;
+  width: 100%;
+  background-color: #f6f6f6;
+}
+.topography-bg::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  opacity: 0.3;
+  background-image: var(--topography-pattern-url);
+  background-attachment: scroll;
+  background-size: 400px 400px;
+  background-repeat: repeat;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --modal-enter-duration: 0ms;
+    --modal-exit-duration: 0ms;
+    --view-transition-duration: 0ms;
+    --expand-duration: 0ms;
+    --list-stagger-delay: 0ms;
+  }
+}
+
+/* Modal enter: fade + slide up from bottom (vertical tone) */
+@keyframes search-modal-enter {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Modal exit: fade + slide down (vertical tone) */
+@keyframes search-modal-exit {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+}
+
+/* View content: slide in from bottom (forward = next step down the flow) */
+@keyframes search-view-enter-from-bottom {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* View content: slide in from top (back = previous step up the flow) */
+@keyframes search-view-enter-from-top {
+  from {
+    opacity: 0;
+    transform: translateY(-24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Profile (and similar) page enter: fade + slight slide up */
+@keyframes profile-enter {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-profile-enter {
+  animation: profile-enter ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-profile-enter {
+    animation: none;
+  }
+}
+
+/* Exiting view: collapse/slide up and fade (forward = current menu pushed up) */
+@keyframes search-view-exit-up {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-32px) scale(0.98);
+  }
+}
+
+/* Exiting view: collapse/slide down and fade (back = current menu pulled down) */
+@keyframes search-view-exit-down {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(24px) scale(0.98);
+  }
+}
+
+.search-modal-enter {
+  animation: search-modal-enter var(--modal-enter-duration) ease-out forwards;
+}
+
+.search-modal-exit {
+  animation: search-modal-exit var(--modal-exit-duration) ease-in forwards;
+}
+
+.search-view-enter-from-bottom {
+  animation: search-view-enter-from-bottom var(--view-transition-duration) ease-out forwards;
+}
+
+.search-view-enter-from-top {
+  animation: search-view-enter-from-top var(--view-transition-duration) ease-out forwards;
+}
+
+.search-view-exit-up {
+  animation: search-view-exit-up var(--view-transition-duration) ease-in forwards;
+  pointer-events: none;
+}
+
+.search-view-exit-down {
+  animation: search-view-exit-down var(--view-transition-duration) ease-in forwards;
+  pointer-events: none;
+}
+
+/* Staggered list item fade-in (for suggestions) */
+@keyframes search-list-item-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.search-list-item {
+  animation: search-list-item-enter var(--expand-duration) ease-out both;
+}
+
+/* Phase 3: Results page — card hover (scale) only when motion is allowed */
+.results-card-hover {
+  transition: box-shadow 0.15s ease, transform 0.2s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .results-card-hover {
+    transition: box-shadow 0.15s ease;
+  }
+  .results-card-hover:hover {
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+.results-card-hover:hover {
+  transform: scale(1.01);
+}
+}
+
+/* Checkout: hide the payment SDK’s built-in pay button; we use the page "Confirm booking" button */
+.checkout-payment-element button[type="submit"],
+.checkout-payment-element .SubmitButton,
+.checkout-payment-element [data-testid="submit-button"] {
+  display: none !important;
+}
+
+/* Phase 6: dual-thumb price range slider (design language) */
+.price-range-slider {
+  position: relative;
+  height: 28px;
+  --thumb-min: 0%;
+  --thumb-max: 100%;
+}
+.price-range-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 6px;
+  background: var(--muted);
+  border-radius: 3px;
+  pointer-events: none;
+}
+.price-range-track::after {
+  content: "";
+  position: absolute;
+  left: var(--thumb-min);
+  width: calc(var(--thumb-max) - var(--thumb-min));
+  top: 0;
+  bottom: 0;
+  background: var(--primary);
+  border-radius: 3px;
+  opacity: 0.35;
+  pointer-events: none;
+}
+.price-range-input {
+  position: absolute;
+  width: 100%;
+  left: 0;
+  top: 0;
+  margin: 0;
+  height: 28px;
+  z-index: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+}
+.price-range-input::-webkit-slider-runnable-track {
+  height: 6px;
+  background: transparent;
+}
+.price-range-input::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 2px solid white;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+  margin-top: -6px;
+}
+.price-range-input::-moz-range-track {
+  height: 6px;
+  background: transparent;
+}
+.price-range-input::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--primary);
+  border: 2px solid white;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+}
+.price-range-min {
+  pointer-events: none;
+}
+.price-range-min::-webkit-slider-thumb {
+  pointer-events: auto;
+}
+.price-range-min::-moz-range-thumb {
+  pointer-events: auto;
+}
+.price-range-max {
+  z-index: 2;
+  pointer-events: none;
+}
+.price-range-max::-webkit-slider-thumb {
+  pointer-events: auto;
+}
+.price-range-max::-moz-range-thumb {
+  pointer-events: auto;
+}
