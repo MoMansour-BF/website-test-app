@@ -278,7 +278,7 @@ export async function POST(req: NextRequest) {
       ? (resp.data as any[]).map((d: any) => d.hotelId).filter(Boolean)
       : [];
     const orderedIds = fromHotels.length > 0 ? fromHotels : fromData;
-    const uniqueOrderedIds = [...new Set(orderedIds)];
+    const uniqueOrderedIds: string[] = [...new Set(orderedIds)].map((x) => String(x));
     const hotelIdsToEnrich = ENRICH_ALL_HOTELS
       ? uniqueOrderedIds
       : uniqueOrderedIds.slice(0, FIRST_N_HOTELS_TO_ENRICH);

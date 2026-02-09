@@ -20,7 +20,7 @@ function parseRoomDescription(html: string): { label?: string; content: string }
     const before = s.slice(lastIndex, m.index).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
     if (before) sections.push({ content: before });
     const label = m[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-    if (label) sections.push({ label });
+    if (label) sections.push({ label, content: "" });
     lastIndex = strongRegex.lastIndex;
   }
   const after = s.slice(lastIndex).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
