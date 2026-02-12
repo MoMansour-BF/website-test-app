@@ -900,7 +900,7 @@ function ResultsContent() {
           displayName: selectedPlaceName!,
           formattedAddress: selectedPlaceAddress ?? undefined,
           types: selectedPlaceTypes,
-          type: selectedPlaceType,
+          type: selectedPlaceType as NormalizedPlaceType | undefined,
           lat: selectedPlaceLat,
           lng: selectedPlaceLng,
           countryCode: selectedCountryCode,
