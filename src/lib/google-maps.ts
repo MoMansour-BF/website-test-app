@@ -14,11 +14,18 @@ const BRAND = {
   muted: "#E5E7EB",
 } as const;
 
+/** Map style entry (compatible with Google Maps MapTypeStyle; avoids @types/google.maps dependency). */
+interface MapTypeStyle {
+  featureType?: string;
+  elementType?: string;
+  stylers?: Array<Record<string, unknown>>;
+}
+
 /**
  * JSON map styles: hide POI business, hide park labels, keep transit lines;
  * optional brand-aligned colors for water, roads, and labels.
  */
-export const MAP_STYLES: google.maps.MapTypeStyle[] = [
+export const MAP_STYLES: MapTypeStyle[] = [
   { featureType: "poi.business", stylers: [{ visibility: "off" }] },
   {
     featureType: "poi.park",
@@ -40,7 +47,16 @@ export const MAP_STYLES: google.maps.MapTypeStyle[] = [
  * Default options applied to every map: no Street View (Pegman), no Map/Satellite toggle,
  * zoom control only. Aligns with common OTA behavior (clean, minimal controls).
  */
-export const DEFAULT_MAP_OPTIONS: google.maps.MapOptions = {
+export const DEFAULT_MAP_OPTIONS: {
+  styles: MapTypeStyle[];
+  streetViewControl: boolean;
+  mapTypeControl: boolean;
+  fullscreenControl: boolean;
+  zoomControl: boolean;
+  scaleControl: boolean;
+  rotateControl: boolean;
+  clickableIcons: boolean;
+} = {
   styles: MAP_STYLES,
   streetViewControl: false,
   mapTypeControl: false,

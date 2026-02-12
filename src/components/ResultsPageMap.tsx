@@ -134,7 +134,7 @@ function createPriceOverlay(
       if (panes?.overlayMouseTarget) panes.overlayMouseTarget.appendChild(this.div);
     }
 
-    draw() {
+    draw = () => {
       if (!this.div) return;
       const projection = (this as unknown as { getProjection: () => { fromLatLngToDivPixel: (latLng: unknown) => { x: number; y: number } } | null }).getProjection?.();
       if (!projection) return;
@@ -146,12 +146,12 @@ function createPriceOverlay(
         this.div.style.top = `${point.y}px`;
         this.div.style.transform = "translate(-50%, -50%)";
       }
-    }
+    };
 
-    onRemove() {
+    onRemove = () => {
       if (this.div?.parentNode) this.div.parentNode.removeChild(this.div);
       this.div = null;
-    }
+    };
 
     getPosition() {
       return this.position;
@@ -211,7 +211,7 @@ function createClusterOverlay(
       if (panes?.overlayMouseTarget) panes.overlayMouseTarget.appendChild(this.div);
     }
 
-    draw() {
+    draw = () => {
       if (!this.div) return;
       const projection = (this as unknown as { getProjection: () => { fromLatLngToDivPixel: (latLng: unknown) => { x: number; y: number } } | null }).getProjection?.();
       if (!projection) return;
@@ -223,12 +223,12 @@ function createClusterOverlay(
         this.div.style.top = `${point.y}px`;
         this.div.style.transform = "translate(-50%, -50%)";
       }
-    }
+    };
 
-    onRemove() {
+    onRemove = () => {
       if (this.div?.parentNode) this.div.parentNode.removeChild(this.div);
       this.div = null;
-    }
+    };
   }
   return new ClusterOverlay(position, count, onClick);
 }
@@ -384,7 +384,7 @@ export function ResultsPageMap({
     const OverlayView = google.maps.OverlayView;
     const LatLng = google.maps.LatLng;
     class ProjectionOverlay extends OverlayView {
-      draw() {
+      draw = () => {
         const proj = (this as unknown as { getProjection: () => MapProjection | null }).getProjection?.();
         if (proj) {
           projectionRef.current = proj;
@@ -393,9 +393,9 @@ export function ResultsPageMap({
             setProjectionReady(true);
           }
         }
-      }
-      onAdd() {}
-      onRemove() {}
+      };
+      onAdd = () => {};
+      onRemove = () => {};
     }
     const projOverlay = new ProjectionOverlay();
     projOverlay.setMap(map);
@@ -416,7 +416,7 @@ export function ResultsPageMap({
       if (typeof newZoom === "number") setZoomLevel(newZoom);
     };
     const listener = window.google.maps.event.addListener(map, "zoom_changed", handler);
-    return () => window.google.maps.event.removeListener(listener);
+    return () => window.google?.maps?.event?.removeListener(listener);
   }, [mapReady]);
 
   // Draw markers and clusters: zoom-dependent lat/lng clustering; cluster click = zoom in, decluster when animation ends
