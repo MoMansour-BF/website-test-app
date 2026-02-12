@@ -3,6 +3,7 @@
 import { SearchModal } from "@/components/SearchModal";
 import { ImageGallery } from "@/components/ImageGallery";
 import { RoomDetailSheet } from "@/components/RoomDetailSheet";
+import { HotelPageMap } from "@/components/HotelPageMap";
 import { MapPinIcon, CalendarIcon, UsersIcon, WifiIcon, BreakfastIcon, BedIcon, ShareIcon, HeartIcon, HeartIconFilled, ArrowLeftIcon } from "@/components/Icons";
 import { useLocaleCurrency } from "@/context/LocaleCurrencyContext";
 import { useFavoriteHotels } from "@/context/FavoriteHotelsContext";
@@ -25,6 +26,8 @@ interface HotelDetails {
   city?: string;
   country?: string;
   address?: string;
+  /** Phase 1: from LiteAPI data.location — for map block (Phase 2). */
+  location?: { latitude: number; longitude: number };
   hotelFacilities?: string[];
   starRating?: number;
   rating?: number;
@@ -283,7 +286,16 @@ export default function HotelPage() {
         if (!res.ok || json?.error) {
           throw new Error(json?.error?.message ?? "Failed to load hotel details");
         }
-        const data = json.data as HotelDetails;
+        const raw = json.data as HotelDetails & { location?: { latitude?: number; longitude?: number; lat?: number; lng?: number } };
+        const data: HotelDetails = { ...raw };
+        if (raw?.location && typeof raw.location === "object") {
+          const loc = raw.location;
+          const lat = loc.latitude ?? loc.lat;
+          const lng = loc.longitude ?? loc.lng;
+          if (typeof lat === "number" && typeof lng === "number" && !Number.isNaN(lat) && !Number.isNaN(lng)) {
+            data.location = { latitude: lat, longitude: lng };
+          }
+        }
         setDetails(data);
         pushRecentHotel({ hotelId, name: data?.name });
       } catch (err: any) {
@@ -313,6 +325,7 @@ export default function HotelPage() {
             checkout,
             occupancies: toApiOccupancies(occupancies),
             currency,
+            guestNationality: DEFAULT_NATIONALITY,
             language: locale
           })
         });
@@ -405,14 +418,12 @@ export default function HotelPage() {
       const cancelInfo = firstRate.cancellationPolicies?.cancelPolicyInfos?.[0];
       const image = roomMeta?.photos?.[0]?.url ?? heroImage;
 
-      // Pay at property = sum of taxesAndFees where included: false (LiteAPI)
+      // Pay at property = taxesAndFees where included: false (LiteAPI). Total for all rooms, duplicated per rate — count once (first rate only).
       let payAtProperty = 0;
-      for (const r of rt.rates ?? []) {
-        const fees = r?.retailRate?.taxesAndFees;
-        if (Array.isArray(fees)) {
-          for (const f of fees) {
-            if (f?.included === false && typeof f?.amount === "number") payAtProperty += f.amount;
-          }
+      const fees = firstRate?.retailRate?.taxesAndFees;
+      if (Array.isArray(fees)) {
+        for (const f of fees) {
+          if (f?.included === false && typeof f?.amount === "number") payAtProperty += f.amount;
         }
       }
 
@@ -653,7 +664,7 @@ export default function HotelPage() {
                   const url = last ? lastSearchResultsUrl(last) : resultsUrl(parseResultsSearchParams(searchParams));
                   router.push(url);
                 }}
-                className="h-10 w-10 rounded-full bg-white/95 shadow-md border border-[var(--sky-blue)] flex items-center justify-center text-[var(--dark-text)] shrink-0"
+                className="h-9 w-9 shrink-0 rounded-full border border-[var(--sky-blue)] bg-[var(--light-bg)] flex items-center justify-center text-[var(--dark-text)] hover:bg-[var(--muted)] focus:outline-none focus:ring-2 focus:ring-[var(--primary)] transition-colors duration-150"
                 aria-label="Back to results"
               >
                 <ArrowLeftIcon className="w-5 h-5" />
@@ -735,6 +746,30 @@ export default function HotelPage() {
               </button>
             )}
           </section>
+
+          {/* Phase 2: Location / Map — only when details.location is present; no LiteAPI Map Widget */}
+          {details.location &&
+            typeof details.location.latitude === "number" &&
+            typeof details.location.longitude === "number" && (
+              <section className="space-y-2" aria-label="Location and map">
+                <h3 className="text-sm font-semibold text-[var(--dark-text)]">
+                  Location
+                </h3>
+                <HotelPageMap
+                  location={details.location}
+                  hotelName={details.name}
+                />
+                <a
+                  href={`https://www.google.com/maps?q=${details.location.latitude},${details.location.longitude}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 text-sm font-medium text-[var(--primary)] hover:underline"
+                >
+                  <MapPinIcon className="w-4 h-4 shrink-0" />
+                  View on Google Maps
+                </a>
+              </section>
+            )}
 
           {/* About the Hotel: short description before highlights; See more / Show less */}
           {details.hotelDescription && (() => {

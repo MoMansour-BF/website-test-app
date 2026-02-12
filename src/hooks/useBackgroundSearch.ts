@@ -89,17 +89,43 @@ export function useBackgroundSearch(
         abortControllerRef.current = controller;
 
         const occupancies = parseOccupanciesParam(scheduledParams.occupancies);
+        const usePlaceIdForSearch =
+          scheduledParams.mode === "place" &&
+          (scheduledParams.placeType === "city" || scheduledParams.placeType === "country");
+        const effectiveLat =
+          scheduledParams.latitude ?? scheduledParams.centerLat;
+        const effectiveLng =
+          scheduledParams.longitude ?? scheduledParams.centerLng;
+        const effectiveRadius =
+          scheduledParams.radius ??
+          scheduledParams.searchRadius ??
+          (effectiveLat != null ? 50000 : undefined);
+        const hasAreaParams =
+          !usePlaceIdForSearch &&
+          effectiveLat != null &&
+          effectiveLng != null &&
+          effectiveRadius != null &&
+          effectiveRadius > 0;
+
         const body = {
           mode: scheduledParams.mode,
-          ...(scheduledParams.mode === "place"
+          ...(scheduledParams.mode === "place" && hasAreaParams
             ? {
-                placeId: scheduledParams.placeId ?? undefined,
-                placeName: scheduledParams.placeName ?? undefined,
-                placeTypes: scheduledParams.placeTypes?.length
-                  ? scheduledParams.placeTypes
-                  : undefined
+                latitude: effectiveLat,
+                longitude: effectiveLng,
+                radius: effectiveRadius,
+                countryCode: scheduledParams.countryCode ?? undefined
               }
-            : { aiSearch: scheduledParams.aiSearch ?? undefined }),
+            : scheduledParams.mode === "place"
+              ? {
+                  placeId: scheduledParams.placeId ?? undefined,
+                  placeName: scheduledParams.placeName ?? undefined,
+                  placeTypes: scheduledParams.placeTypes?.length
+                    ? scheduledParams.placeTypes
+                    : undefined,
+                  countryCode: scheduledParams.countryCode ?? undefined
+                }
+              : { aiSearch: scheduledParams.aiSearch ?? undefined }),
           checkin: scheduledParams.checkin,
           checkout: scheduledParams.checkout,
           occupancies: toApiOccupancies(occupancies),

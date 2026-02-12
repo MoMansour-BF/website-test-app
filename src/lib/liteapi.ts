@@ -1,3 +1,5 @@
+import { isCountryRestricted } from "@/config/content-restrictions";
+
 // Validated inside request function
 const API_BASE = "https://api.liteapi.travel/v3.0";
 const BOOK_BASE = "https://book.liteapi.travel/v3.0";
@@ -144,6 +146,12 @@ export interface RatesSearchParams {
   facilities?: number[];
   /** Phase 7: when true, hotel must have all specified facilities. */
   strictFacilityFiltering?: boolean;
+  /** Phase 4: map-driven "search this area". Radius in meters. When set with latitude/longitude, LiteAPI searches within this area. */
+  latitude?: number;
+  longitude?: number;
+  radius?: number;
+  /** Phase 7: country code from normalized place; LITEAPI restricts results to this country */
+  countryCode?: string;
 }
 
 /**
@@ -173,7 +181,11 @@ export function buildRatesRequestBody(params: RatesSearchParams): Record<string,
     minRating,
     minReviewsCount,
     facilities,
-    strictFacilityFiltering
+    strictFacilityFiltering,
+    latitude,
+    longitude,
+    radius,
+    countryCode
   } = params;
 
   const body: Record<string, unknown> = {
@@ -204,10 +216,25 @@ export function buildRatesRequestBody(params: RatesSearchParams): Record<string,
   if (facilities != null && Array.isArray(facilities) && facilities.length > 0) body.facilities = facilities;
   if (strictFacilityFiltering === true) body.strictFacilityFiltering = true;
 
-  if (mode === "place" && placeId) {
-    body.placeId = placeId;
-  } else if (mode === "vibe" && aiSearch) {
-    body.aiSearch = aiSearch;
+  // Phase 7: country code restricts LITEAPI to hotels within this country (primary defense for cross-border radius searches).
+  if (countryCode && typeof countryCode === "string" && countryCode.trim() !== "" && !isCountryRestricted(countryCode.trim())) {
+    body.countryCode = countryCode.trim();
+  }
+
+  // Use lat/lng/radius only when present; do not send placeId with area params (avoids over-restricting results).
+  const hasAreaParams =
+    latitude != null && typeof latitude === "number" && !Number.isNaN(latitude) &&
+    longitude != null && typeof longitude === "number" && !Number.isNaN(longitude) &&
+    radius != null && typeof radius === "number" && !Number.isNaN(radius) && radius > 0;
+
+  if (hasAreaParams) {
+    body.latitude = latitude;
+    body.longitude = longitude;
+    body.radius = radius;
+    // Do not send placeId when using area search (hotel pick or "Search this area") so results are not over-restricted.
+  } else {
+    if (mode === "place" && placeId) body.placeId = placeId;
+    else if (mode === "vibe" && aiSearch) body.aiSearch = aiSearch;
   }
 
   return body;
@@ -297,11 +324,13 @@ export async function getHotelRatesForHotel(params: {
   return request<any>("api", "/hotels/rates", "POST", { body, apiKey });
 }
 
-/** Phase 4: canonical hotel details from /data/hotel (LiteAPI Displaying Essential Hotel Details). */
+/** Phase 4: canonical hotel details from /data/hotel (LiteAPI Displaying Essential Hotel Details). Phase 1: location for maps. */
 export interface HotelDetailsData {
   rating?: number;
   reviewCount?: number;
   starRating?: number;
+  /** Phase 1: from data.location — for map markers (results) and hotel page map. */
+  location?: { latitude: number; longitude: number };
 }
 
 const HOTEL_DETAILS_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -317,6 +346,7 @@ function cacheKey(hotelId: string, language?: string): string {
 /**
  * Phase 4: Extract canonical hotel details from API response. Prefer data.rating,
  * data.reviewCount, data.starRating; keep snake_case/alternate fallbacks.
+ * Phase 1: also extract data.location (latitude/longitude) for maps.
  */
 export function extractHotelDetailsFromResponse(data: any): HotelDetailsData | null {
   if (!data || typeof data !== "object") return null;
@@ -333,10 +363,23 @@ export function extractHotelDetailsFromResponse(data: any): HotelDetailsData | n
   const numRating = rating != null ? Number(rating) : undefined;
   const numReviewCount = reviewCount != null ? Number(reviewCount) : undefined;
   const numStarRating = starRating != null ? Number(starRating) : undefined;
+
+  // Phase 1: location from data.location or data.latitude/longitude
+  let location: { latitude: number; longitude: number } | undefined;
+  const loc = data.location;
+  if (loc && typeof loc === "object" && typeof loc.latitude === "number" && typeof loc.longitude === "number") {
+    location = { latitude: loc.latitude, longitude: loc.longitude };
+  } else if (loc && typeof loc === "object" && typeof loc.lat === "number" && typeof loc.lng === "number") {
+    location = { latitude: loc.lat, longitude: loc.lng };
+  } else if (typeof data.latitude === "number" && typeof data.longitude === "number") {
+    location = { latitude: data.latitude, longitude: data.longitude };
+  }
+
   if (
     numRating == null &&
     numReviewCount == null &&
-    numStarRating == null
+    numStarRating == null &&
+    location == null
   )
     return null;
   const out: HotelDetailsData = {};
@@ -345,6 +388,7 @@ export function extractHotelDetailsFromResponse(data: any): HotelDetailsData | n
     out.reviewCount = numReviewCount;
   if (numStarRating != null && !Number.isNaN(numStarRating))
     out.starRating = numStarRating;
+  if (location != null) out.location = location;
   return out;
 }
 

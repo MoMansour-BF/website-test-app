@@ -39,38 +39,50 @@ import {
 import Link from "next/link";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
-import { serializePlaceTypes, type PlaceSuggestion } from "@/lib/place-utils";
+import { serializePlaceTypes, type NormalizedPlaceType, type PlaceSuggestion } from "@/lib/place-utils";
+import { determineSearchRoute } from "@/lib/search-routing";
 
 type SearchMode = "place" | "vibe";
 
+/** Popular destination chips on home. Include center coords so results page has distance sort + map center. */
 const POPULAR_DESTINATIONS = [
   {
     placeId: "ChIJdYeB7UwbwhURzslwz2kkq5g",
     name: "Makkah",
+    centerLat: 21.4225,
+    centerLng: 39.8262,
     image:
       "https://images.unsplash.com/photo-1592326871020-04f58c1a52f3?q=80&w=930&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D",
   },
   {
     placeId: "ChIJs7s9zbKHUhQRYMPTi_kHuC0",
     name: "Hurghada",
+    centerLat: 27.2579,
+    centerLng: 33.8116,
     image:
       "https://images.unsplash.com/photo-1722264222007-3e4f1808db3e?q=80&w=2066&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D",
   },
   {
     placeId: "ChIJu46S-ZZhLxMROG5lkwZ3D7k",
     name: "Rome",
+    centerLat: 41.9028,
+    centerLng: 12.4964,
     image:
       "https://images.unsplash.com/photo-1552832230-c0197dd311b5?q=80&w=1696&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D",
   },
   {
     placeId: "ChIJoQ8Q6NNB0S0RkOYkS7EPkSQ",
     name: "Bali",
+    centerLat: -8.6705,
+    centerLng: 115.2126,
     image:
       "https://images.unsplash.com/photo-1555400038-63f5ba517a47?q=80&w=2940&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D",
   },
   {
     placeId: "ChIJ51cu8IcbXWARiRtXIothAS4",
     name: "Tokyo",
+    centerLat: 35.6762,
+    centerLng: 139.6503,
     image:
       "https://images.unsplash.com/photo-1536098561742-ca998e48cbcc?q=80&w=1136&auto=format&fit=crop&ixlib=rb-4.1.0&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D",
   },
@@ -122,6 +134,10 @@ export default function HomePage() {
   const [placeLabel, setPlaceLabel] = useState<string | null>(null);
   const [placeFormattedAddress, setPlaceFormattedAddress] = useState<string | null>(null);
   const [placeTypes, setPlaceTypes] = useState<string[]>([]);
+  const [placeCountryCode, setPlaceCountryCode] = useState<string | undefined>(undefined);
+  const [placePlaceType, setPlacePlaceType] = useState<NormalizedPlaceType | undefined>(undefined);
+  const [placeLat, setPlaceLat] = useState<number | undefined>(undefined);
+  const [placeLng, setPlaceLng] = useState<number | undefined>(undefined);
   const [checkin, setCheckin] = useState("");
   const [checkout, setCheckout] = useState("");
   const [occupancies, setOccupancies] = useState<Occupancy[]>(() => DEFAULT_OCCUPANCIES);
@@ -162,6 +178,10 @@ export default function HomePage() {
     setPlaceLabel(last.placeName);
     setPlaceFormattedAddress(last.placeAddress ?? null);
     setPlaceTypes(last.placeTypes ?? []);
+    setPlaceCountryCode(last.countryCode ?? undefined);
+    setPlacePlaceType(last.placeType ?? undefined);
+    setPlaceLat(last.centerLat);
+    setPlaceLng(last.centerLng);
     setQuery(last.mode === "place" ? (last.placeName ?? "") : (last.aiSearch ?? ""));
     if (last.checkin) setCheckin(last.checkin);
     if (last.checkout) setCheckout(last.checkout);
@@ -343,6 +363,8 @@ export default function HomePage() {
       checkout: checkout || featuredDates.checkout,
       occupancies: occupancies.length ? occupancies : DEFAULT_OCCUPANCIES,
       nationality: "EG",
+      countryCode: mode === "place" ? placeCountryCode : undefined,
+      placeType: mode === "place" ? placePlaceType : undefined,
     });
     const locationKey = mode === "place" ? placeId ?? "" : (query?.trim() ?? "");
     const trigger =
@@ -357,6 +379,8 @@ export default function HomePage() {
     placeLabel,
     placeFormattedAddress,
     placeTypes,
+    placeCountryCode,
+    placePlaceType,
     query,
     checkin,
     checkout,
@@ -372,6 +396,33 @@ export default function HomePage() {
 
   const doSearch = () => {
     if (!canSubmit) return;
+    // Phase 10: routing by place type (distance sort + center for hotel/airport/attraction)
+    const selectedPlace: PlaceSuggestion =
+      mode === "place" && placeId && placeLabel
+        ? {
+            placeId,
+            displayName: placeLabel,
+            formattedAddress: placeFormattedAddress ?? undefined,
+            types: placeTypes,
+            type: placePlaceType,
+            lat: placeLat,
+            lng: placeLng,
+            countryCode: placeCountryCode,
+          }
+        : { placeId: "", displayName: "" };
+    const routingDecision =
+      mode === "place" && placeId && placeLabel
+        ? determineSearchRoute(selectedPlace)
+        : { destination: "results-list" as const, context: {} };
+
+    const placeCenterLat = routingDecision.context.centerLat ?? (mode === "place" ? placeLat : undefined);
+    const placeCenterLng = routingDecision.context.centerLng ?? (mode === "place" ? placeLng : undefined);
+    const placeSearchRadius = routingDecision.context.enableDistanceSorting
+      ? 10000
+      : placeCenterLat != null && placeCenterLng != null
+        ? 50000
+        : undefined;
+
     const params = buildResultsQueryParams({
       mode: mode === "place" ? "place" : "vibe",
       placeId: mode === "place" ? placeId : null,
@@ -383,6 +434,12 @@ export default function HomePage() {
       checkout,
       occupancies,
       nationality: "EG",
+      sort: routingDecision.context.enableDistanceSorting ? "distance_asc" : "recommended",
+      centerLat: placeCenterLat,
+      centerLng: placeCenterLng,
+      searchRadius: placeSearchRadius,
+      countryCode: mode === "place" ? placeCountryCode : undefined,
+      placeType: mode === "place" ? placePlaceType : undefined,
     });
     setLastSearch(params);
     pushRecentSearch(params);
@@ -413,6 +470,10 @@ export default function HomePage() {
     setPlaceLabel(place.displayName || null);
     setPlaceFormattedAddress(place.formattedAddress ?? null);
     setPlaceTypes(place.types ?? []);
+    setPlaceCountryCode(place.countryCode ?? undefined);
+    setPlacePlaceType(place.type ?? undefined);
+    setPlaceLat(place.lat);
+    setPlaceLng(place.lng);
     setQuery(place.displayName);
     setSuggestions([]);
     setPlacesError(null);
@@ -556,6 +617,9 @@ export default function HomePage() {
                   mode: "place",
                   placeId: dest.placeId,
                   placeName: dest.name,
+                  placeType: "city",
+                  centerLat: dest.centerLat,
+                  centerLng: dest.centerLng,
                   checkin: featuredDates.checkin,
                   checkout: featuredDates.checkout,
                   occupancies: DEFAULT_OCCUPANCIES,

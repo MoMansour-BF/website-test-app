@@ -33,7 +33,7 @@ const MAX_TIMEOUT_SECONDS = 30;
 /** Phase 7: in-memory cache for full search response. Key = canonical params string; value = { at, payload }. */
 const searchCache = new Map<string, { at: number; payload: unknown; headers: Headers }>();
 
-/** Phase 7: build cache key from all params that affect the result (exclude client-only: refundable, sort, price range, name). */
+/** Phase 7: build cache key from all params that affect the result (exclude client-only: refundable, sort, price range, name). Phase 4: include lat/lng/radius. Phase 7: include countryCode. */
 function ratesSearchCacheKey(params: {
   mode: string;
   placeId?: string;
@@ -52,11 +52,19 @@ function ratesSearchCacheKey(params: {
   minReviewsCount: number | undefined;
   facilities: number[] | undefined;
   strictFacilityFiltering: boolean | undefined;
+  latitude?: number;
+  longitude?: number;
+  radius?: number;
+  countryCode?: string;
 }): string {
   const occ = JSON.stringify(params.occupancies);
   const star = (params.starRating ?? []).slice().sort((a, b) => a - b).join(",");
   const fac = (params.facilities ?? []).slice().sort((a, b) => a - b).join(",");
-  return `rates:${params.mode}:${params.placeId ?? ""}:${params.aiSearch ?? ""}:${params.checkin}:${params.checkout}:${occ}:${params.currency ?? ""}:${params.language ?? ""}:${params.guestNationality}:${params.timeout}:${params.margin ?? ""}:${params.additionalMarkup ?? ""}:${star}:${params.minRating ?? ""}:${params.minReviewsCount ?? ""}:${fac}:${params.strictFacilityFiltering ?? false}`;
+  const lat = params.latitude ?? "";
+  const lng = params.longitude ?? "";
+  const rad = params.radius ?? "";
+  const cc = params.countryCode ?? "";
+  return `rates:${params.mode}:${params.placeId ?? ""}:${params.aiSearch ?? ""}:${params.checkin}:${params.checkout}:${occ}:${params.currency ?? ""}:${params.language ?? ""}:${params.guestNationality}:${params.timeout}:${params.margin ?? ""}:${params.additionalMarkup ?? ""}:${star}:${params.minRating ?? ""}:${params.minReviewsCount ?? ""}:${fac}:${params.strictFacilityFiltering ?? false}:${lat}:${lng}:${rad}:${cc}`;
 }
 
 export async function POST(req: NextRequest) {
@@ -72,7 +80,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { mode, placeId, aiSearch, checkin, checkout, occupancies: rawOccupancies, adults: legacyAdults, currency, guestNationality, language, timeout: requestedTimeout, starRating: bodyStarRating, minRating: bodyMinRating, minReviewsCount: bodyMinReviewsCount, facilities: bodyFacilities, strictFacilityFiltering: bodyStrictFacility } = body;
+  const { mode, placeId, aiSearch, checkin, checkout, occupancies: rawOccupancies, adults: legacyAdults, currency, guestNationality, language, timeout: requestedTimeout, starRating: bodyStarRating, minRating: bodyMinRating, minReviewsCount: bodyMinReviewsCount, facilities: bodyFacilities, strictFacilityFiltering: bodyStrictFacility, latitude: bodyLatitude, longitude: bodyLongitude, radius: bodyRadius, countryCode: bodyCountryCode } = body;
 
   if (!mode || !checkin || !checkout) {
     return NextResponse.json(
@@ -102,18 +110,25 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  if (mode === "place" && !placeId) {
-    return NextResponse.json(
-      { error: { message: "Something's missing in your search.", code: "INVALID_PARAMS" } },
-      { status: 400 }
-    );
-  }
+  // Phase 4: area-only search (lat/lng/radius) does not require placeId or aiSearch
+  const latitude = typeof bodyLatitude === "number" && !Number.isNaN(bodyLatitude) ? bodyLatitude : undefined;
+  const longitude = typeof bodyLongitude === "number" && !Number.isNaN(bodyLongitude) ? bodyLongitude : undefined;
+  const radius = typeof bodyRadius === "number" && !Number.isNaN(bodyRadius) && bodyRadius > 0 ? bodyRadius : undefined;
+  const hasAreaParams = latitude != null && longitude != null && radius != null;
 
-  if (mode === "vibe" && !aiSearch) {
-    return NextResponse.json(
-      { error: { message: "Something's missing in your search.", code: "INVALID_PARAMS" } },
-      { status: 400 }
-    );
+  if (!hasAreaParams) {
+    if (mode === "place" && !placeId) {
+      return NextResponse.json(
+        { error: { message: "Something's missing in your search.", code: "INVALID_PARAMS" } },
+        { status: 400 }
+      );
+    }
+    if (mode === "vibe" && !aiSearch) {
+      return NextResponse.json(
+        { error: { message: "Something's missing in your search.", code: "INVALID_PARAMS" } },
+        { status: 400 }
+      );
+    }
   }
 
   try {
@@ -140,10 +155,12 @@ export async function POST(req: NextRequest) {
       : undefined;
     const strictFacilityFiltering = bodyStrictFacility === true;
 
+    const countryCode = typeof bodyCountryCode === "string" && bodyCountryCode.trim() !== "" ? bodyCountryCode.trim() : undefined;
+
+    // When hasAreaParams, send only lat/lng/radius (no placeId) so results are not over-restricted. Otherwise send placeId/aiSearch.
     const baseParams = {
       mode,
-      placeId,
-      aiSearch,
+      ...(hasAreaParams ? { latitude, longitude, radius } : { placeId, aiSearch }),
       checkin,
       checkout,
       occupancies,
@@ -159,10 +176,11 @@ export async function POST(req: NextRequest) {
       ...(minRating != null && { minRating }),
       ...(minReviewsCount != null && { minReviewsCount }),
       ...(facilities != null && facilities.length > 0 && { facilities }),
-      ...(strictFacilityFiltering && { strictFacilityFiltering: true as const })
+      ...(strictFacilityFiltering && { strictFacilityFiltering: true as const }),
+      ...(countryCode && { countryCode })
     };
 
-    // Phase 7: check cache before calling LiteAPI (same key = same result)
+    // Phase 7: check cache before calling LiteAPI (same key = same result). Phase 4: include lat/lng/radius.
     const cacheKey = ratesSearchCacheKey({
       mode,
       placeId,
@@ -180,7 +198,9 @@ export async function POST(req: NextRequest) {
       minRating,
       minReviewsCount,
       facilities,
-      strictFacilityFiltering: strictFacilityFiltering || undefined
+      strictFacilityFiltering: strictFacilityFiltering || undefined,
+      ...(hasAreaParams && { latitude, longitude, radius }),
+      ...(countryCode && { countryCode })
     });
     const now = Date.now();
     const cached = searchCache.get(cacheKey);
@@ -254,8 +274,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Enrich with hotel details (rating, reviewCount, starRating) for list cards (Phase 4)
-    const hotelDetailsByHotelId: Record<string, { reviewCount?: number; rating?: number; starRating?: number }> = {};
+    // Enrich with hotel details (rating, reviewCount, starRating, location) for list cards and map (Phase 4 + Phase 1)
+    const hotelDetailsByHotelId: Record<string, { reviewCount?: number; rating?: number; starRating?: number; location?: { latitude: number; longitude: number } }> = {};
 
     // 1) Use any rating/reviewCount/starRating from the rates response hotel object (canonical + fallbacks)
     if (Array.isArray(resp.data)) {
@@ -296,6 +316,9 @@ export async function POST(req: NextRequest) {
           if (details.rating != null) hotelDetailsByHotelId[id].rating = details.rating;
           if (details.reviewCount != null) hotelDetailsByHotelId[id].reviewCount = details.reviewCount;
           if (details.starRating != null) hotelDetailsByHotelId[id].starRating = details.starRating;
+          if (details.location && typeof details.location.latitude === "number" && typeof details.location.longitude === "number") {
+            hotelDetailsByHotelId[id].location = details.location;
+          }
         }
       });
     }

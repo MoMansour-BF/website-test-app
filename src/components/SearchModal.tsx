@@ -21,7 +21,11 @@ import {
   SearchIcon,
   UsersIcon,
 } from "@/components/Icons";
+import { getPlaceDetails } from "@/lib/google-place-details";
+import { normalizePlace } from "@/lib/normalize-location";
 import { isSpecificHotelPlace, type PlaceSuggestion } from "@/lib/place-utils";
+import { processPredictions } from "@/lib/process-predictions";
+import { useGooglePlacesSession } from "@/hooks/useGooglePlacesSession";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const MAX_RANGE_DAYS = 30;
@@ -277,6 +281,7 @@ export function SearchModal({
   const [suggestions, setSuggestions] = useState<PlaceSuggestion[]>([]);
   const [loadingPlaces, setLoadingPlaces] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const placesSession = useGooglePlacesSession();
 
   // Exit: 220ms to match --modal-exit-duration; 0 when user prefers reduced motion.
   const requestClose = useCallback(() => {
@@ -310,6 +315,12 @@ export function SearchModal({
     return () => clearTimeout(t);
   }, [exitingView, viewTransitionDurationMs]);
 
+  // Reset Google Places session when modal opens (one token per search session)
+  useEffect(() => {
+    placesSession.resetSession();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount when modal opens
+  }, []);
+
   useEffect(() => {
     if (view !== "where") return;
     const t = setTimeout(() => inputRef.current?.focus(), 100);
@@ -325,21 +336,27 @@ export function SearchModal({
     const timeout = setTimeout(async () => {
       try {
         setLoadingPlaces(true);
-        const params = new URLSearchParams({ q: searchInput.trim() });
-        if (locale) params.set("language", locale);
-        const res = await fetch(`/api/places?${params.toString()}`, {
+        const languageCode = locale === "ar" ? "ar" : "en";
+        const res = await fetch("/api/google-places/autocomplete", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           credentials: "include",
           signal: controller.signal,
+          body: JSON.stringify({
+            input: searchInput.trim(),
+            sessionToken: placesSession.getToken(),
+            languageCode,
+          }),
         });
         if (!res.ok) throw new Error("Failed to load places");
         const json = await res.json();
-        const data = (json?.data ?? []) as any[];
+        const processed = processPredictions(json, 10);
         setSuggestions(
-          data.map((p: any) => ({
+          processed.map((p) => ({
             placeId: p.placeId,
-            displayName: p.displayName,
-            formattedAddress: p.formattedAddress,
-            types: Array.isArray(p.types) ? p.types : undefined,
+            displayName: p.mainText,
+            formattedAddress: p.description || `${p.mainText}${p.secondaryText ? `, ${p.secondaryText}` : ""}`,
+            types: p.types,
           }))
         );
       } catch (err: any) {
@@ -352,20 +369,51 @@ export function SearchModal({
       controller.abort();
       clearTimeout(timeout);
     };
-  }, [view, searchInput, locale]);
+  }, [view, searchInput, locale, placesSession]);
 
-  const handleSelectPlaceFullScreen = (place: PlaceSuggestion) => {
-    onPlaceSelect(place);
-    onQueryChange(place.displayName);
-    setSearchInput(place.displayName);
-    setView("when");
+  const handleSelectPlaceFullScreen = async (place: PlaceSuggestion) => {
+    try {
+      const languageCode = (locale === "ar" ? "ar" : "en") as "ar" | "en";
+      const details = await getPlaceDetails({
+        placeId: place.placeId,
+        sessionToken: placesSession.getToken(),
+        languageCode,
+      });
+      const normalized = normalizePlace(details as Parameters<typeof normalizePlace>[0]);
+      placesSession.markTokenUsed();
+      onPlaceSelect(normalized);
+      onQueryChange(normalized.displayName);
+      setSearchInput(normalized.displayName);
+      setView("when");
+    } catch (err) {
+      // Fallback: use suggestion data without details (no session mark)
+      onPlaceSelect(place);
+      onQueryChange(place.displayName);
+      setSearchInput(place.displayName);
+      setView("when");
+    }
   };
 
-  const handleSelectPlaceFromOverview = (place: PlaceSuggestion) => {
-    onPlaceSelect(place);
-    onQueryChange(place.displayName);
-    setSearchInput(place.displayName);
-    setView("when");
+  const handleSelectPlaceFromOverview = async (place: PlaceSuggestion) => {
+    try {
+      const languageCode = (locale === "ar" ? "ar" : "en") as "ar" | "en";
+      const details = await getPlaceDetails({
+        placeId: place.placeId,
+        sessionToken: placesSession.getToken(),
+        languageCode,
+      });
+      const normalized = normalizePlace(details as Parameters<typeof normalizePlace>[0]);
+      placesSession.markTokenUsed();
+      onPlaceSelect(normalized);
+      onQueryChange(normalized.displayName);
+      setSearchInput(normalized.displayName);
+      setView("when");
+    } catch (err) {
+      onPlaceSelect(place);
+      onQueryChange(place.displayName);
+      setSearchInput(place.displayName);
+      setView("when");
+    }
   };
 
   const dateRangeText =

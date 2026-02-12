@@ -202,6 +202,23 @@ export function LocalityIcon({ className }: { className?: string }) {
   );
 }
 
+/** Map view icon for results page (open map section). */
+export function MapIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8 2v4" />
+      <path d="M16 2v4" />
+      <path d="M8 18v4" />
+      <path d="M16 18v4" />
+      <rect x="2" y="6" width="20" height="12" rx="1" />
+      <path d="M2 10h20" />
+      <path d="M2 14h20" />
+      <path d="M8 6V18" />
+      <path d="M16 6V18" />
+    </svg>
+  );
+}
+
 /** Generic establishment / point of interest for place autocomplete. */
 export function EstablishmentIcon({ className }: { className?: string }) {
   return (

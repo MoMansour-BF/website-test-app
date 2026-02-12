@@ -3,11 +3,13 @@
 import { HotelCard } from "@/components/HotelCard";
 import { BottomNav } from "@/components/BottomNav";
 import { SearchModal } from "@/components/SearchModal";
-import { MapPinIcon, FilterIcon } from "@/components/Icons";
+import { MapPinIcon, FilterIcon, MapIcon, ArrowLeftIcon } from "@/components/Icons";
+import { ResultsPageMap } from "@/components/ResultsPageMap";
 import { useFavoriteHotels } from "@/context/FavoriteHotelsContext";
 import { useLocaleCurrency } from "@/context/LocaleCurrencyContext";
 import { formatRangeShort, parseYYYYMMDD } from "@/lib/date-utils";
-import { parsePlaceTypes, serializePlaceTypes, type PlaceSuggestion, isSpecificHotelPlace } from "@/lib/place-utils";
+import { parsePlaceTypes, serializePlaceTypes, type PlaceSuggestion, type NormalizedPlaceType, isSpecificHotelPlace, shouldSortByDistance } from "@/lib/place-utils";
+import { calculateHotelDistances, formatDistance } from "@/lib/distance-utils";
 import { getSearchErrorMessage } from "@/lib/search-errors";
 import { getRatesSearchTimeout } from "@/lib/rates-timeout";
 import { DEFAULT_OCCUPANCIES, getNights, parseOccupanciesParam, serializeOccupancies, toApiOccupancies, totalGuests } from "@/lib/occupancy";
@@ -19,14 +21,17 @@ import {
   serializeResultsQuery,
   backgroundSearchParamsSignature,
   PRELOADED_SEARCH_RESULT_KEY,
-  type ResultsSortOption
+  type ResultsSortOption,
+  type ResultsQueryParams
 } from "@/lib/results-query";
+import { determineSearchRoute } from "@/lib/search-routing";
 import { normalizeForSearch } from "@/lib/normalize-search-text";
+import { isCountryRestricted, isLocationRestricted } from "@/config/content-restrictions";
 import { getLastSearch, setLastSearch, pushRecentSearch } from "@/lib/lastSearch";
 import { useBackgroundSearch } from "@/hooks/useBackgroundSearch";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState, Suspense, useRef } from "react";
+import { useCallback, useEffect, useMemo, useState, Suspense, useRef } from "react";
 import { useScrollDirection } from "@/hooks/useScrollDirection";
 
 const INITIAL_BATCH = 24;
@@ -67,8 +72,8 @@ interface SearchResponse {
   pricesByHotelId: Record<string, PriceInfo>;
   /** Per hotelId: true if the hotel has at least one refundable rate (any room/rate). */
   hasRefundableRateByHotelId?: Record<string, boolean>;
-  /** Enriched from hotel details API (Phase 4: rating, reviewCount, starRating). */
-  hotelDetailsByHotelId?: Record<string, { reviewCount?: number; rating?: number; starRating?: number }>;
+  /** Enriched from hotel details API (Phase 4: rating, reviewCount, starRating). Phase 1: location for map markers. */
+  hotelDetailsByHotelId?: Record<string, { reviewCount?: number; rating?: number; starRating?: number; location?: { latitude: number; longitude: number } }>;
 }
 
 function ResultsLoading({ locationLabel }: { locationLabel?: string }) {
@@ -126,7 +131,15 @@ function ResultsContent() {
     stars: starsParam,
     minRating: minRatingParam,
     minReviewsCount: minReviewsCountParam,
-    facilities: facilitiesParam
+    facilities: facilitiesParam,
+    latitude: latitudeParam,
+    longitude: longitudeParam,
+    radius: radiusParam,
+    countryCode: countryCodeParam,
+    centerLat: centerLatParam,
+    centerLng: centerLngParam,
+    placeType: placeTypeParam,
+    searchRadius: searchRadiusParam
   } = queryParams;
   const placeTypesParam = queryParams.placeTypes.length
     ? placeTypesFromUrl.join(",")
@@ -145,6 +158,7 @@ function ResultsContent() {
   const [retryCount, setRetryCount] = useState(0);
   const [visibleCount, setVisibleCount] = useState(INITIAL_BATCH);
   const [filterPanelOpen, setFilterPanelOpen] = useState(false);
+  const [mapViewOpen, setMapViewOpen] = useState(false);
   const [countLineVisible, setCountLineVisible] = useState(true);
   // Phase 8: lazy-load "Show all properties" — second request without quality filters
   const [lazyLoadResult, setLazyLoadResult] = useState<SearchResponse | null>(null);
@@ -191,6 +205,11 @@ function ResultsContent() {
   const [selectedPlaceName, setSelectedPlaceName] = useState<string | null>(null);
   const [selectedPlaceAddress, setSelectedPlaceAddress] = useState<string | null>(null);
   const [selectedPlaceTypes, setSelectedPlaceTypes] = useState<string[]>([]);
+  const [selectedCountryCode, setSelectedCountryCode] = useState<string | undefined>(undefined);
+  const [selectedPlaceType, setSelectedPlaceType] = useState<string | undefined>(undefined);
+  /** Phase 10: lat/lng for routing (distance sort center when place is hotel/airport/attraction). */
+  const [selectedPlaceLat, setSelectedPlaceLat] = useState<number | undefined>(undefined);
+  const [selectedPlaceLng, setSelectedPlaceLng] = useState<number | undefined>(undefined);
 
   const [searchModalOpen, setSearchModalOpen] = useState(false);
   const { isFavorite, toggleFavorite } = useFavoriteHotels();
@@ -204,6 +223,7 @@ function ResultsContent() {
   const [filterSort, setFilterSort] = useState<ResultsSortOption>(sortOrder);
   const [filterStars, setFilterStars] = useState<number[]>(starsParam ?? []);
   const [filterMinRating, setFilterMinRating] = useState(minRatingParam != null ? String(minRatingParam) : "");
+  const [filterRadius, setFilterRadius] = useState<number>(10000); // 10km default (Phase 9)
   useEffect(() => {
     if (!filterPanelOpen) return;
     setFilterRefundable(!!refundableOnlyParam);
@@ -213,10 +233,38 @@ function ResultsContent() {
     setFilterSort(sortOrder);
     setFilterStars(starsParam ?? []);
     setFilterMinRating(minRatingParam != null ? String(minRatingParam) : "");
-  }, [filterPanelOpen, refundableOnlyParam, minPriceParam, maxPriceParam, nameFilterParam, sortOrder, starsParam, minRatingParam]);
+    setFilterRadius(searchRadiusParam ?? 10000);
+  }, [filterPanelOpen, refundableOnlyParam, minPriceParam, maxPriceParam, nameFilterParam, sortOrder, starsParam, minRatingParam, searchRadiusParam]);
 
-  // Sync state with URL params on load/change (Phase 2: URL is source of truth)
+  // Phase 8: center for distance sort — use centerLat/centerLng from URL, or fallback to map-search lat/lng
+  const effectiveCenterLat = centerLatParam ?? latitudeParam;
+  const effectiveCenterLng = centerLngParam ?? longitudeParam;
+  const hasCenter = effectiveCenterLat != null && effectiveCenterLng != null;
+
   useEffect(() => {
+    if (!placeTypeParam || !hasCenter) return;
+    if (shouldSortByDistance(placeTypeParam as NormalizedPlaceType) && sortOrder === "recommended") {
+      handleSortChange("distance_asc");
+    }
+  }, [placeTypeParam, hasCenter, sortOrder]);
+
+  // Sync state with URL params on load/change (Phase 2: URL is source of truth).
+  // Only overwrite modal/bar state when the URL has valid required params; otherwise a brief
+  // empty searchParams (e.g. after closing full-screen map) would clear selectedPlaceId/placeName
+  // and break the next search from the modal.
+  // Use primitive deps (placeTypesParam, effectiveOccupanciesParam) so we don't re-run on every
+  // re-render after map close when only array refs (placeTypesFromUrl, occupancies) change.
+  useEffect(() => {
+    const hasAreaParams =
+      !!latitudeParam && !!longitudeParam && !!radiusParam && Number(radiusParam) > 0;
+    const hasRequired =
+      !!checkinParam &&
+      !!checkoutParam &&
+      (mode === "place"
+        ? !!placeIdParam || hasAreaParams
+        : !!aiSearchParam?.trim());
+    if (!hasRequired) return;
+
     setGlobalSearchCheckin(checkinParam);
     setGlobalSearchCheckout(checkoutParam);
     setGlobalSearchOccupanciesParam(effectiveOccupanciesParam);
@@ -230,21 +278,36 @@ function ResultsContent() {
       setSelectedPlaceName(placeNameParam);
       setSelectedPlaceAddress(placeAddressParam);
       setSelectedPlaceTypes(placeTypesFromUrl);
+      setSelectedCountryCode(queryParams.countryCode ?? undefined);
+      setSelectedPlaceType(queryParams.placeType ?? undefined);
+      setSelectedPlaceLat(centerLatParam ?? undefined);
+      setSelectedPlaceLng(centerLngParam ?? undefined);
     } else {
       setSelectedPlaceId(null);
       setSelectedPlaceTypes([]);
       setSelectedPlaceName(null);
       setSelectedPlaceAddress(null);
+      setSelectedCountryCode(undefined);
+      setSelectedPlaceType(undefined);
+      setSelectedPlaceLat(undefined);
+      setSelectedPlaceLng(undefined);
     }
 
     setVisibleCount(INITIAL_BATCH);
-  }, [mode, placeIdParam, placeNameParam, placeAddressParam, placeTypesFromUrl, aiSearchParam, checkinParam, checkoutParam, effectiveOccupanciesParam, occupancies]);
+  }, [mode, placeIdParam, placeNameParam, placeAddressParam, placeTypesParam, queryParams.countryCode, queryParams.placeType, centerLatParam, centerLngParam, aiSearchParam, checkinParam, checkoutParam, effectiveOccupanciesParam, occupancies]);
 
-  // Only run search when we have required params (avoids 400 from API) — must be before effects that use it
+  // Only run search when we have required params (avoids 400 from API). Place mode: placeId OR area (lat/lng/radius).
+  const hasAreaOnlyParams =
+    !!latitudeParam &&
+    !!longitudeParam &&
+    !!radiusParam &&
+    Number(radiusParam) > 0;
   const hasRequiredSearchParams =
     !!checkinParam &&
     !!checkoutParam &&
-    (mode === "place" ? !!placeIdParam : !!aiSearchParam?.trim());
+    (mode === "place"
+      ? !!placeIdParam || hasAreaOnlyParams
+      : !!aiSearchParam?.trim());
 
   // Phase 3.5: optional redirect when landing on /results with no params
   useEffect(() => {
@@ -280,6 +343,8 @@ function ResultsContent() {
       occupancies: editOccupancies,
       nationality: nationalityParam,
       sort: sortOrder,
+      countryCode: hasPlace ? (selectedCountryCode ?? countryCodeParam) : undefined,
+      placeType: hasPlace ? (selectedPlaceType ?? queryParams.placeType) : undefined,
     });
     const locationKey = hasPlace ? selectedPlaceId ?? "" : (globalSearchQuery?.trim() ?? "");
     const trigger =
@@ -293,6 +358,11 @@ function ResultsContent() {
     selectedPlaceName,
     selectedPlaceAddress,
     selectedPlaceTypes,
+    selectedCountryCode,
+    selectedPlaceType,
+    countryCodeParam,
+    queryParams.placeType,
+    queryParams.countryCode,
     globalSearchQuery,
     globalSearchCheckin,
     globalSearchCheckout,
@@ -346,16 +416,37 @@ function ResultsContent() {
         setError(null);
         setLazyLoadResult(null);
         setLazyLoadError(null);
-        // Either place (placeId + placeName) or vibe (aiSearch), not both — LiteAPI expects one location method.
+        // City/country: use placeId (area can exceed default radius). Others: use lat/lng/radius only.
+        const usePlaceIdForSearch =
+          mode === "place" &&
+          (placeTypeParam === "city" || placeTypeParam === "country");
+        const effectiveLat = latitudeParam ?? centerLatParam;
+        const effectiveLng = longitudeParam ?? centerLngParam;
+        const effectiveRadius = radiusParam ?? searchRadiusParam ?? (effectiveLat != null ? 50000 : undefined);
+        const hasAreaParams =
+          !usePlaceIdForSearch &&
+          effectiveLat != null &&
+          effectiveLng != null &&
+          effectiveRadius != null &&
+          effectiveRadius > 0;
+
         const body = {
           mode,
-          ...(mode === "place"
+          ...(mode === "place" && hasAreaParams
             ? {
-                placeId: placeIdParam ?? undefined,
-                placeName: placeNameParam ?? undefined,
-                placeTypes: placeTypesParam ? placeTypesParam.split(",").filter(Boolean) : undefined
+                latitude: effectiveLat,
+                longitude: effectiveLng,
+                radius: effectiveRadius,
+                countryCode: countryCodeParam ?? undefined
               }
-            : { aiSearch: aiSearchParam ?? undefined }),
+            : mode === "place"
+              ? {
+                  placeId: placeIdParam ?? undefined,
+                  placeName: placeNameParam ?? undefined,
+                  placeTypes: placeTypesParam ? placeTypesParam.split(",").filter(Boolean) : undefined,
+                  countryCode: countryCodeParam ?? undefined
+                }
+              : { aiSearch: aiSearchParam ?? undefined }),
           checkin: checkinParam,
           checkout: checkoutParam,
           occupancies: toApiOccupancies(occupancies),
@@ -407,7 +498,7 @@ function ResultsContent() {
     return () => {
       abortController.abort();
     };
-  }, [hasRequiredSearchParams, mode, placeIdParam, placeNameParam, placeTypesParam, aiSearchParam, checkinParam, checkoutParam, occupancies, currency, locale, nationalityParam, searchParams, retryCount]);
+  }, [hasRequiredSearchParams, mode, placeIdParam, placeNameParam, placeTypesParam, placeTypeParam, countryCodeParam, aiSearchParam, checkinParam, checkoutParam, occupancies, currency, locale, nationalityParam, latitudeParam, longitudeParam, radiusParam, centerLatParam, centerLngParam, searchRadiusParam, searchParams, retryCount]);
 
   // Phase 4: same order as server and as displayed in Recommended (raw.hotels first, then raw.data). Used for wave 2+ batch order.
   const allHotelIdsInRecommendedOrder = useMemo(() => {
@@ -450,7 +541,7 @@ function ResultsContent() {
         const json = await res.json();
         if (!res.ok || json?.error) return;
         if (searchGenerationRef.current !== generationAtStart) return;
-        const batch = json.hotelDetailsByHotelId as Record<string, { reviewCount?: number; rating?: number; starRating?: number }>;
+        const batch = json.hotelDetailsByHotelId as Record<string, { reviewCount?: number; rating?: number; starRating?: number; location?: { latitude: number; longitude: number } }>;
         if (batch && Object.keys(batch).length > 0) {
           setData((prev) =>
             prev
@@ -513,9 +604,58 @@ function ResultsContent() {
     [data?.hasRefundableRateByHotelId, lazyLoadResult?.hasRefundableRateByHotelId]
   );
 
+  // Phase 8: distance from center for sorting (and later radius filter)
+  const hotelDistances = useMemo(() => {
+    if (effectiveCenterLat == null || effectiveCenterLng == null) return {};
+    const mergedDetails = { ...(data?.hotelDetailsByHotelId ?? {}), ...(lazyLoadResult?.hotelDetailsByHotelId ?? {}) };
+    const allHotelsForDistance = [...allHotels, ...lazyOnlyHotels];
+    return calculateHotelDistances(allHotelsForDistance, mergedDetails, effectiveCenterLat, effectiveCenterLng);
+  }, [allHotels, lazyOnlyHotels, data?.hotelDetailsByHotelId, lazyLoadResult?.hotelDetailsByHotelId, effectiveCenterLat, effectiveCenterLng]);
+
   // Phase 6: client-side filters (refundable, price range, property name) — no new request; state in URL.
+  // Phase 3.5: content restriction safety net — filter out hotels in restricted countries / geographic areas.
   const filteredHotels = useMemo(() => {
     let list = allHotels;
+
+    // CRITICAL (Layer 4): Remove hotels from restricted countries & geographic areas.
+    // This is a safety net in case upstream data sources return restricted hotels.
+    list = list.filter((hotel) => {
+      // Check country code if available in hotel metadata
+      const hotelCountryCode =
+        (hotel as any).countryCode ??
+        (hotel as any).country_code ??
+        (hotel as any).country;
+      if (hotelCountryCode && isCountryRestricted(hotelCountryCode)) {
+        return false;
+      }
+
+      // Check geographic coordinates against restricted bounding boxes
+      const details = data?.hotelDetailsByHotelId?.[hotel.id];
+      const location = details?.location;
+      if (
+        location?.latitude != null &&
+        location?.longitude != null &&
+        isLocationRestricted(location.latitude, location.longitude)
+      ) {
+        return false;
+      }
+
+      return true;
+    });
+
+    // Phase 9: distance/radius filter when center and searchRadius are set
+    if (
+      hasCenter &&
+      searchRadiusParam != null &&
+      searchRadiusParam > 0 &&
+      Object.keys(hotelDistances).length > 0
+    ) {
+      list = list.filter((h) => {
+        const distance = hotelDistances[h.id];
+        return distance != null && distance <= searchRadiusParam!;
+      });
+    }
+
     if (refundableOnlyParam && mergedHasRefundableByHotelId) {
       list = list.filter((h) => mergedHasRefundableByHotelId[h.id] === true);
     }
@@ -530,11 +670,18 @@ function ResultsContent() {
       list = list.filter((h) => normalizeForSearch(h.name ?? "").includes(q));
     }
     return list;
-  }, [allHotels, mergedHasRefundableByHotelId, mergedPricesByHotelId, refundableOnlyParam, minPriceParam, maxPriceParam, nameFilterParam]);
+  }, [allHotels, data?.hotelDetailsByHotelId, hasCenter, searchRadiusParam, hotelDistances, mergedHasRefundableByHotelId, mergedPricesByHotelId, refundableOnlyParam, minPriceParam, maxPriceParam, nameFilterParam]);
 
   const sortedHotels = useMemo(() => {
     const list = [...filteredHotels];
     if (sortOrder === "recommended") return list;
+    if (sortOrder === "distance_asc") {
+      return list.sort((a, b) => {
+        const distA = hotelDistances[a.id] ?? Infinity;
+        const distB = hotelDistances[b.id] ?? Infinity;
+        return distA - distB;
+      });
+    }
     if (sortOrder === "price_asc") {
       return list.sort((a, b) => {
         const pa = mergedPricesByHotelId[a.id]?.amount ?? Infinity;
@@ -553,11 +700,47 @@ function ResultsContent() {
       return list.sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
     }
     return list;
-  }, [filteredHotels, sortOrder, mergedPricesByHotelId]);
+  }, [filteredHotels, sortOrder, mergedPricesByHotelId, hotelDistances]);
 
   // Phase 8: same filters and sort applied to lazy-only segment
+  // Phase 3.5: content restriction safety net applied here too.
   const filteredLazyHotels = useMemo(() => {
     let list = lazyOnlyHotels;
+
+    // CRITICAL (Layer 4): Same geographic restriction as main list
+    list = list.filter((hotel) => {
+      const hotelCountryCode =
+        (hotel as any).countryCode ??
+        (hotel as any).country_code ??
+        (hotel as any).country;
+      if (hotelCountryCode && isCountryRestricted(hotelCountryCode)) {
+        return false;
+      }
+      const details = data?.hotelDetailsByHotelId?.[hotel.id] ?? lazyLoadResult?.hotelDetailsByHotelId?.[hotel.id];
+      const location = details?.location;
+      if (
+        location?.latitude != null &&
+        location?.longitude != null &&
+        isLocationRestricted(location.latitude, location.longitude)
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    // Phase 9: distance/radius filter (same as main list)
+    if (
+      hasCenter &&
+      searchRadiusParam != null &&
+      searchRadiusParam > 0 &&
+      Object.keys(hotelDistances).length > 0
+    ) {
+      list = list.filter((h) => {
+        const distance = hotelDistances[h.id];
+        return distance != null && distance <= searchRadiusParam!;
+      });
+    }
+
     if (refundableOnlyParam && mergedHasRefundableByHotelId) {
       list = list.filter((h) => mergedHasRefundableByHotelId[h.id] === true);
     }
@@ -572,11 +755,18 @@ function ResultsContent() {
       list = list.filter((h) => normalizeForSearch(h.name ?? "").includes(q));
     }
     return list;
-  }, [lazyOnlyHotels, mergedHasRefundableByHotelId, mergedPricesByHotelId, refundableOnlyParam, minPriceParam, maxPriceParam, nameFilterParam]);
+  }, [lazyOnlyHotels, data?.hotelDetailsByHotelId, lazyLoadResult?.hotelDetailsByHotelId, hasCenter, searchRadiusParam, hotelDistances, mergedHasRefundableByHotelId, mergedPricesByHotelId, refundableOnlyParam, minPriceParam, maxPriceParam, nameFilterParam]);
 
   const sortedLazyHotels = useMemo(() => {
     const list = [...filteredLazyHotels];
     if (sortOrder === "recommended") return list;
+    if (sortOrder === "distance_asc") {
+      return list.sort((a, b) => {
+        const distA = hotelDistances[a.id] ?? Infinity;
+        const distB = hotelDistances[b.id] ?? Infinity;
+        return distA - distB;
+      });
+    }
     if (sortOrder === "price_asc") {
       return list.sort((a, b) => {
         const pa = mergedPricesByHotelId[a.id]?.amount ?? Infinity;
@@ -595,7 +785,7 @@ function ResultsContent() {
       return list.sort((a, b) => (b.rating ?? 0) - (a.rating ?? 0));
     }
     return list;
-  }, [filteredLazyHotels, sortOrder, mergedPricesByHotelId]);
+  }, [filteredLazyHotels, sortOrder, mergedPricesByHotelId, hotelDistances]);
 
   const visibleHotels = sortedHotels.slice(0, visibleCount);
   const hasMore = visibleCount < sortedHotels.length;
@@ -632,7 +822,8 @@ function ResultsContent() {
           ? {
               placeId: placeIdParam ?? undefined,
               placeName: placeNameParam ?? undefined,
-              placeTypes: placeTypesParam ? placeTypesParam.split(",").filter(Boolean) : undefined
+              placeTypes: placeTypesParam ? placeTypesParam.split(",").filter(Boolean) : undefined,
+              countryCode: countryCodeParam ?? undefined
             }
           : { aiSearch: aiSearchParam ?? undefined }),
         checkin: checkinParam,
@@ -641,8 +832,13 @@ function ResultsContent() {
         currency,
         guestNationality: nationalityParam,
         language: locale,
-        timeout: getRatesSearchTimeout()
+        timeout: getRatesSearchTimeout(),
         // Omit starRating, minRating, minReviewsCount, facilities so we get budget & unrated options
+        ...(latitudeParam != null && longitudeParam != null && radiusParam != null && radiusParam > 0 && {
+          latitude: latitudeParam,
+          longitude: longitudeParam,
+          radius: radiusParam
+        })
       };
       const res = await fetch("/api/rates/search", {
         method: "POST",
@@ -675,7 +871,8 @@ function ResultsContent() {
     (minPriceParam != null && !Number.isNaN(minPriceParam)) || (maxPriceParam != null && !Number.isNaN(maxPriceParam)),
     !!nameFilterParam?.trim(),
     (starsParam?.length ?? 0) > 0,
-    minRatingParam != null && !Number.isNaN(minRatingParam)
+    minRatingParam != null && !Number.isNaN(minRatingParam),
+    hasCenter && searchRadiusParam != null && searchRadiusParam > 0
   ].filter(Boolean).length;
 
   const handleSelectPlace = (place: PlaceSuggestion) => {
@@ -683,6 +880,10 @@ function ResultsContent() {
     setSelectedPlaceName(place.displayName);
     setSelectedPlaceAddress(place.formattedAddress ?? null);
     setSelectedPlaceTypes(place.types ?? []);
+    setSelectedCountryCode(place.countryCode ?? undefined);
+    setSelectedPlaceType(place.type ?? undefined);
+    setSelectedPlaceLat(place.lat);
+    setSelectedPlaceLng(place.lng);
     setGlobalSearchQuery(place.displayName);
   };
 
@@ -691,6 +892,28 @@ function ResultsContent() {
     const hasVibe = !!globalSearchQuery?.trim();
     const hasDates = !!(globalSearchCheckin && globalSearchCheckout);
     if (!hasDates || (!hasPlace && !hasVibe)) return;
+
+    // Phase 10: routing by place type (distance sort + center for hotel/airport/attraction)
+    const selectedPlace: PlaceSuggestion = hasPlace
+      ? {
+          placeId: selectedPlaceId!,
+          displayName: selectedPlaceName!,
+          formattedAddress: selectedPlaceAddress ?? undefined,
+          types: selectedPlaceTypes,
+          type: selectedPlaceType,
+          lat: selectedPlaceLat,
+          lng: selectedPlaceLng,
+          countryCode: selectedCountryCode,
+        }
+      : { placeId: "", displayName: "" };
+    const routingDecision = hasPlace ? determineSearchRoute(selectedPlace) : { destination: "results-list" as const, context: {} };
+    const placeCenterLat = routingDecision.context.centerLat ?? (hasPlace ? selectedPlaceLat : undefined);
+    const placeCenterLng = routingDecision.context.centerLng ?? (hasPlace ? selectedPlaceLng : undefined);
+    const placeSearchRadius = routingDecision.context.enableDistanceSorting
+      ? 10000
+      : placeCenterLat != null && placeCenterLng != null
+        ? 50000
+        : undefined;
 
     const params = buildResultsQueryParams({
       mode: hasPlace ? "place" : "vibe",
@@ -703,13 +926,18 @@ function ResultsContent() {
       checkout: globalSearchCheckout,
       occupancies: editOccupancies,
       nationality: nationalityParam,
-      sort: sortOrder,
+      sort: routingDecision.context.enableDistanceSorting ? "distance_asc" : sortOrder,
+      centerLat: placeCenterLat,
+      centerLng: placeCenterLng,
+      searchRadius: placeSearchRadius,
       refundableOnly: queryParams.refundableOnly,
       minPrice: queryParams.minPrice,
       maxPrice: queryParams.maxPrice,
       name: queryParams.name,
       stars: queryParams.stars,
-      minRating: queryParams.minRating
+      minRating: queryParams.minRating,
+      countryCode: hasPlace ? (selectedCountryCode ?? queryParams.countryCode) : undefined,
+      placeType: hasPlace ? (selectedPlaceType ?? queryParams.placeType) : undefined,
     });
     const preloaded = backgroundSearch.getResultForParams(params);
     if (preloaded != null && typeof preloaded === "object") {
@@ -727,6 +955,40 @@ function ResultsContent() {
     }
     router.push(resultsUrl(params));
   };
+
+  // Phase 4: map-driven "Search this area" — use lat/lng/radius only; drop placeId so the API is called with area params only.
+  const handleSearchThisArea = useCallback(
+    async (center: { lat: number; lng: number }, radiusMeters: number) => {
+      let countryCode: string | null | undefined;
+      try {
+        const res = await fetch(
+          `/api/geocode/reverse?lat=${encodeURIComponent(center.lat)}&lng=${encodeURIComponent(center.lng)}`
+        );
+        const json = (await res.json()) as { countryCode?: string | null };
+        countryCode = json?.countryCode ?? undefined;
+      } catch {
+        countryCode = undefined;
+      }
+      // Build area-only params: lat/lng/radius (no placeId) so the search request uses latitude/longitude/radius in all code paths.
+      const params: ResultsQueryParams = {
+        ...queryParams,
+        placeId: null,
+        placeName: null,
+        placeAddress: null,
+        placeTypes: [],
+        placeType: undefined,
+        centerLat: undefined,
+        centerLng: undefined,
+        searchRadius: undefined,
+        latitude: center.lat,
+        longitude: center.lng,
+        radius: radiusMeters,
+        ...(countryCode != null && countryCode !== "" && { countryCode })
+      };
+      router.push(resultsUrl(params));
+    },
+    [queryParams, router]
+  );
 
   const handleSortChange = (newSort: ResultsSortOption) => {
     router.replace(
@@ -748,7 +1010,8 @@ function ResultsContent() {
       maxPrice: maxPrice != null && !Number.isNaN(maxPrice) ? maxPrice : undefined,
       name: filterName.trim() || undefined,
       stars: stars.length > 0 ? stars : undefined,
-      minRating
+      minRating,
+      ...(hasCenter && { searchRadius: filterRadius })
     };
     router.replace(resultsUrl(params));
     setFilterPanelOpen(false);
@@ -783,7 +1046,7 @@ function ResultsContent() {
           className="h-9 w-9 shrink-0 rounded-full border border-[var(--sky-blue)] bg-[var(--light-bg)] flex items-center justify-center text-[var(--dark-text)] hover:bg-[var(--muted)] focus:outline-none focus:ring-2 focus:ring-[var(--primary)] transition-colors duration-150"
           aria-label="Back to home"
         >
-          ←
+          <ArrowLeftIcon className="w-5 h-5" />
         </Link>
         <button
           type="button"
@@ -804,6 +1067,14 @@ function ResultsContent() {
               {dateRangeTextBar} · {guestsSummaryBar}
             </p>
           </div>
+        </button>
+        <button
+          type="button"
+          onClick={() => setMapViewOpen(true)}
+          className="h-9 w-9 shrink-0 rounded-full border border-[var(--sky-blue)] bg-[var(--light-bg)] flex items-center justify-center text-[var(--dark-text)] hover:bg-[var(--muted)] focus:outline-none focus:ring-2 focus:ring-[var(--primary)] transition-colors duration-150"
+          aria-label="Map"
+        >
+          <MapIcon className="w-5 h-5" />
         </button>
         <button
           type="button"
@@ -828,10 +1099,10 @@ function ResultsContent() {
           }`}
         >
           {lazyLoadResult
-            ? `${sortedHotels.length + sortedLazyHotels.length} hotel${sortedHotels.length + sortedLazyHotels.length !== 1 ? "s" : ""} in ${locationLabel}`
+            ? `${sortedHotels.length + sortedLazyHotels.length} hotel${sortedHotels.length + sortedLazyHotels.length !== 1 ? "s" : ""} found`
             : sortedHotels.length === allHotels.length
-              ? `${allHotels.length} hotel${allHotels.length !== 1 ? "s" : ""} in ${locationLabel}`
-              : `${sortedHotels.length} of ${allHotels.length} hotel${allHotels.length !== 1 ? "s" : ""} in ${locationLabel}`}
+              ? `${allHotels.length} hotel${allHotels.length !== 1 ? "s" : ""} found`
+              : `${sortedHotels.length} of ${allHotels.length} hotel${allHotels.length !== 1 ? "s" : ""} found`}
         </p>
       )}
 
@@ -878,6 +1149,9 @@ function ResultsContent() {
                     className="w-full rounded-full border border-[var(--sky-blue)] bg-[var(--light-bg)] pl-3 pr-9 py-2.5 text-sm font-medium text-[var(--dark-text)] focus:outline-none focus:ring-2 focus:ring-[var(--primary)] transition-colors duration-150"
                   >
                     <option value="recommended">Recommended</option>
+                    {hasCenter && (
+                      <option value="distance_asc">Distance (nearest first)</option>
+                    )}
                     <option value="price_asc">Price: Low to High</option>
                     <option value="price_desc">Price: High to Low</option>
                     <option value="rating_desc">Rating: High to Low</option>
@@ -967,6 +1241,33 @@ function ResultsContent() {
                   {currency} {filterMinPrice === "" ? priceBounds.min : filterMinPrice} – {currency} {filterMaxPrice === "" ? priceBounds.max : filterMaxPrice}
                 </p>
               </div>
+
+              {hasCenter && (
+                <div>
+                  <label className="block text-xs font-medium text-[var(--muted-foreground)] mb-1.5">
+                    Distance from center
+                  </label>
+                  <div className="radius-slider mt-2 mb-3">
+                    <input
+                      type="range"
+                      min={1000}
+                      max={50000}
+                      step={1000}
+                      value={filterRadius}
+                      onChange={(e) => setFilterRadius(Number(e.target.value))}
+                      className="w-full"
+                      aria-label="Search radius"
+                    />
+                  </div>
+                  <p className="text-xs text-[var(--muted-foreground)] mb-2">
+                    Within {formatDistance(filterRadius)}
+                  </p>
+                  <p className="text-xs text-[var(--muted-foreground)] italic">
+                    Only shows hotels with location data
+                  </p>
+                </div>
+              )}
+
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="block text-xs font-medium text-[var(--muted-foreground)] mb-1">Min price ({currency})</label>
@@ -1123,6 +1424,27 @@ function ResultsContent() {
         </div>
       )}
 
+      {/* Phase 3: full-screen map view; closing returns to list with same URL/state (3.2b) */}
+      {mapViewOpen && (
+        <ResultsPageMap
+          onClose={() => setMapViewOpen(false)}
+          onOpenFilters={() => setFilterPanelOpen(true)}
+          hotels={sortedHotels}
+          hotelDetailsByHotelId={data?.hotelDetailsByHotelId ?? {}}
+          pricesByHotelId={mergedPricesByHotelId}
+          hasRefundableByHotelId={mergedHasRefundableByHotelId ?? {}}
+          currency={currency}
+          nights={nights}
+          occupanciesLength={occupancies.length}
+          queryParams={queryParams}
+          serializeResultsQuery={serializeResultsQuery}
+          isFavorite={isFavorite}
+          onToggleFavorite={toggleFavorite}
+          isVibeSearch={mode === "vibe"}
+          onSearchThisArea={handleSearchThisArea}
+        />
+      )}
+
       {loading && <ResultsLoading locationLabel={locationLabel} />}
 
       {/* Phase 9: clear error state — muted styling, actionable "Try again" */}
@@ -1180,6 +1502,7 @@ function ResultsContent() {
         <section className="space-y-4">
           {visibleHotels.map((hotel) => {
             const price = mergedPricesByHotelId[hotel.id];
+            const distance = hotelDistances[hotel.id];
             const hrefParamsStr = serializeResultsQuery(queryParams).toString();
             const hasAnyRefundable = mergedHasRefundableByHotelId[hotel.id];
 
@@ -1194,6 +1517,7 @@ function ResultsContent() {
                 href={`/hotel/${hotel.id}?${hrefParamsStr}`}
                 isFavorite={isFavorite(hotel.id)}
                 onToggleFavorite={() => toggleFavorite(hotel.id)}
+                distance={distance}
               />
             );
           })}
@@ -1252,6 +1576,7 @@ function ResultsContent() {
               </div>
               {sortedLazyHotels.map((hotel) => {
                 const price = mergedPricesByHotelId[hotel.id];
+                const distance = hotelDistances[hotel.id];
                 const hrefParamsStr = serializeResultsQuery(queryParams).toString();
                 const hasAnyRefundable = mergedHasRefundableByHotelId[hotel.id];
 
@@ -1266,6 +1591,7 @@ function ResultsContent() {
                     href={`/hotel/${hotel.id}?${hrefParamsStr}`}
                     isFavorite={isFavorite(hotel.id)}
                     onToggleFavorite={() => toggleFavorite(hotel.id)}
+                    distance={distance}
                   />
                 );
               })}

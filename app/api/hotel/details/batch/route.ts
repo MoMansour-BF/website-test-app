@@ -1,8 +1,8 @@
 /**
  * Phase 4: Batch hotel details for cascaded enrichment (wave 2+).
  * POST body: { hotelIds: string[], language?: string }
- * Returns: { hotelDetailsByHotelId: Record<string, { rating?, reviewCount?, starRating? }> }
- * Uses same cache and concurrency cap as initial search enrichment.
+ * Returns: { hotelDetailsByHotelId: Record<string, { rating?, reviewCount?, starRating?, location? }> }
+ * Phase 1: location (latitude, longitude) for map markers. Uses same cache and concurrency cap as initial search enrichment.
  */
 
 import { getChannelFromRequest } from "@/auth";
@@ -61,14 +61,17 @@ export async function POST(req: NextRequest) {
       (id) => getCachedHotelDetails(id, lang, apiKey)
     );
 
-    const hotelDetailsByHotelId: Record<string, { rating?: number; reviewCount?: number; starRating?: number }> = {};
+    const hotelDetailsByHotelId: Record<string, { rating?: number; reviewCount?: number; starRating?: number; location?: { latitude: number; longitude: number } }> = {};
     detailsResults.forEach((details, i) => {
       const id = hotelIds[i];
       if (!id || !details || typeof details !== "object") return;
-      const entry: { rating?: number; reviewCount?: number; starRating?: number } = {};
+      const entry: { rating?: number; reviewCount?: number; starRating?: number; location?: { latitude: number; longitude: number } } = {};
       if (details.rating != null) entry.rating = details.rating;
       if (details.reviewCount != null) entry.reviewCount = details.reviewCount;
       if (details.starRating != null) entry.starRating = details.starRating;
+      if (details.location && typeof details.location.latitude === "number" && typeof details.location.longitude === "number") {
+        entry.location = details.location;
+      }
       if (Object.keys(entry).length > 0) {
         hotelDetailsByHotelId[id] = entry;
       }

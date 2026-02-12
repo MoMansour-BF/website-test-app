@@ -3,7 +3,7 @@
 import { useAuth } from "@/context/AuthContext";
 import { useLocaleCurrency } from "@/context/LocaleCurrencyContext";
 import { parseOccupanciesParam, totalGuests } from "@/lib/occupancy";
-import { BreakfastIcon, ChevronDownIcon, ChevronUpIcon, InfoIcon, MapPinIcon, UsersIcon } from "@/components/Icons";
+import { ArrowLeftIcon, BreakfastIcon, ChevronDownIcon, ChevronUpIcon, InfoIcon, MapPinIcon, UsersIcon } from "@/components/Icons";
 import { useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useRef, useState, Suspense } from "react";
 
@@ -545,11 +545,13 @@ function CheckoutContent() {
       ? { amount: prebook.data.price, currency: prebook.data.currency }
       : null;
 
-  // Per LiteAPI: included = in retailRate.total (pay now); included: false = pay at property (local fees)
+  // Per LiteAPI: included = in retailRate.total (pay now); included: false = pay at property (local fees).
+  // Included amounts are per-room → sum across all rates. Pay-at-property is total for all rooms, duplicated per rate → count once (first rate only).
   const { includedTaxesAndFeesTotal, localFeesTotal } = (() => {
     if (!payNow) return { includedTaxesAndFeesTotal: null as number | null, localFeesTotal: null as number | null };
     let included = 0;
     let local = 0;
+    let localFeesCounted = false;
     for (const rt of roomTypes) {
       for (const r of (rt as any).rates ?? []) {
         const commission = r?.commission?.[0];
@@ -559,9 +561,12 @@ function CheckoutContent() {
           for (const t of taxes) {
             if (t?.amount == null || typeof t.amount !== "number") continue;
             if (t.included) included += t.amount;
-            else local += t.amount;
+            else if (!localFeesCounted) {
+              local += t.amount;
+            }
           }
         }
+        localFeesCounted = true; // after first rate, stop adding pay-at-property amounts
       }
     }
     return {
@@ -676,10 +681,10 @@ function CheckoutContent() {
             if (occupanciesParam) params.set("occupancies", occupanciesParam);
             router.push(`/hotel/${hotelId}?${params.toString()}`);
           }}
-          className="h-9 w-9 rounded-full border border-[var(--sky-blue)] flex items-center justify-center text-[var(--dark-text)] text-sm hover:bg-[var(--light-bg)] transition-colors shadow-sm"
+          className="h-9 w-9 shrink-0 rounded-full border border-[var(--sky-blue)] bg-[var(--light-bg)] flex items-center justify-center text-[var(--dark-text)] hover:bg-[var(--muted)] focus:outline-none focus:ring-2 focus:ring-[var(--primary)] transition-colors duration-150"
           aria-label="Back to hotel"
         >
-          ←
+          <ArrowLeftIcon className="w-5 h-5" />
         </button>
         <div className="min-w-0 flex-1">
           <h1 className="text-lg font-semibold tracking-tight text-[var(--dark-text)]">
@@ -906,9 +911,15 @@ function CheckoutContent() {
                   </div>
                 )}
                 {priceSummaryTooltip === "taxes" && (
-                  <p className="text-xs text-[var(--muted-foreground)] bg-[var(--light-bg)] border border-[var(--sky-blue)] rounded-lg px-3 py-2">
-                    Commission and taxes included in the pay-now price above.
-                  </p>
+                  <div className="text-xs text-[var(--muted-foreground)] bg-[var(--light-bg)] border border-[var(--sky-blue)] rounded-lg px-3 py-2">
+                    <p className="mb-2">This charge covers:</p>
+                    <ul className="list-disc pl-5 space-y-1">
+                      <li>Taxes paid by the hotel/car company or the booking service to tax authorities (sales tax, occupancy tax, VAT, etc.)</li>
+                      <li>Additional fees like resort fees, cleaning fees, and other charges</li>
+                      <li>Service fees retained by the booking site, hotel supplier, and/or intermediaries as compensation</li>
+                    </ul>
+                    <p className="mt-2">The exact breakdown varies by location, booking amount, and how you booked. Check the terms and conditions for specifics.</p>
+                  </div>
                 )}
                 {localFeesTotal != null && localFeesTotal > 0 && (
                   <>

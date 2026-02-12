@@ -6,13 +6,13 @@
 
 import { parseOccupanciesParam, serializeOccupancies, DEFAULT_OCCUPANCIES } from "@/lib/occupancy";
 import type { Occupancy } from "@/lib/occupancy";
-import { parsePlaceTypes, serializePlaceTypes } from "@/lib/place-utils";
+import { parsePlaceTypes, serializePlaceTypes, type NormalizedPlaceType } from "@/lib/place-utils";
 
 /** Default guest nationality (Phase 0). Must match server default. */
 export const DEFAULT_NATIONALITY = "EG";
 
-/** Sort option for results list (client-side). */
-export type ResultsSortOption = "recommended" | "price_asc" | "price_desc" | "rating_desc";
+/** Sort option for results list (client-side). Phase 8: distance_asc when center point available. */
+export type ResultsSortOption = "recommended" | "price_asc" | "price_desc" | "rating_desc" | "distance_asc";
 
 /**
  * Canonical query params for /results.
@@ -43,6 +43,20 @@ export interface ResultsQueryParams {
   minReviewsCount?: number;
   /** Phase 7: server-side facility IDs (LiteAPI facilities). */
   facilities?: number[];
+  /** Phase 4: map-driven "search this area". Center and radius in meters; when set, search is restricted to this area. */
+  latitude?: number;
+  longitude?: number;
+  radius?: number;
+  /** Phase 7: geographic center for distance-based sorting */
+  centerLat?: number;
+  /** Phase 7: geographic center for distance-based sorting */
+  centerLng?: number;
+  /** Phase 7: search radius in meters (for "Search this area" + distance filtering) */
+  searchRadius?: number;
+  /** Phase 7: place type for routing and sorting logic */
+  placeType?: NormalizedPlaceType;
+  /** Phase 7: country code for country-level searches AND geographic restrictions (LITEAPI) */
+  countryCode?: string;
 }
 
 const DEFAULT_SORT: ResultsSortOption = "recommended";
@@ -78,7 +92,7 @@ export function parseResultsSearchParams(
     occupanciesParam ?? (adultsLegacy ? `${adultsLegacy}` : serializeOccupancies(DEFAULT_OCCUPANCIES));
   const nationality = params.get("nationality") ?? DEFAULT_NATIONALITY;
   const sort = (params.get("sort") as ResultsSortOption) ?? DEFAULT_SORT;
-  const validSorts: ResultsSortOption[] = ["recommended", "price_asc", "price_desc", "rating_desc"];
+  const validSorts: ResultsSortOption[] = ["recommended", "price_asc", "price_desc", "rating_desc", "distance_asc"];
   const sortFinal = validSorts.includes(sort) ? sort : DEFAULT_SORT;
 
   const refundableOnly = params.get("refundableOnly");
@@ -89,6 +103,19 @@ export function parseResultsSearchParams(
   const minRating = params.get("minRating");
   const minReviewsCountParam = params.get("minReviewsCount");
   const facilitiesParam = params.get("facilities");
+  const latitudeParam = params.get("latitude");
+  const longitudeParam = params.get("longitude");
+  const radiusParam = params.get("radius");
+  const countryCodeParam = params.get("countryCode");
+  const placeTypeParam = params.get("placeType");
+  const centerLatParam = params.get("centerLat");
+  const centerLngParam = params.get("centerLng");
+  const searchRadiusParam = params.get("searchRadius");
+
+  const validPlaceTypes: NormalizedPlaceType[] = ["country", "city", "hotel", "airport", "region", "attraction"];
+  const placeType = placeTypeParam && validPlaceTypes.includes(placeTypeParam as NormalizedPlaceType)
+    ? (placeTypeParam as NormalizedPlaceType)
+    : undefined;
 
   return {
     mode,
@@ -113,7 +140,15 @@ export function parseResultsSearchParams(
     ...(minReviewsCountParam != null && minReviewsCountParam !== "" && { minReviewsCount: Number(minReviewsCountParam) }),
     ...(facilitiesParam != null && facilitiesParam !== "" && {
       facilities: facilitiesParam.split(",").map((s) => Number(s.trim())).filter((n) => !Number.isNaN(n))
-    })
+    }),
+    ...(latitudeParam != null && latitudeParam !== "" && !Number.isNaN(Number(latitudeParam)) && { latitude: Number(latitudeParam) }),
+    ...(longitudeParam != null && longitudeParam !== "" && !Number.isNaN(Number(longitudeParam)) && { longitude: Number(longitudeParam) }),
+    ...(radiusParam != null && radiusParam !== "" && !Number.isNaN(Number(radiusParam)) && Number(radiusParam) > 0 && { radius: Number(radiusParam) }),
+    ...(countryCodeParam != null && countryCodeParam !== "" && { countryCode: countryCodeParam.trim() }),
+    ...(placeType && { placeType }),
+    ...(centerLatParam != null && centerLatParam !== "" && !Number.isNaN(Number(centerLatParam)) && { centerLat: Number(centerLatParam) }),
+    ...(centerLngParam != null && centerLngParam !== "" && !Number.isNaN(Number(centerLngParam)) && { centerLng: Number(centerLngParam) }),
+    ...(searchRadiusParam != null && searchRadiusParam !== "" && !Number.isNaN(Number(searchRadiusParam)) && Number(searchRadiusParam) > 0 && { searchRadius: Number(searchRadiusParam) })
   };
 }
 
@@ -145,6 +180,14 @@ export function serializeResultsQuery(params: ResultsQueryParams): URLSearchPara
   if (params.minRating != null) q.set("minRating", String(params.minRating));
   if (params.minReviewsCount != null) q.set("minReviewsCount", String(params.minReviewsCount));
   if (params.facilities?.length) q.set("facilities", params.facilities.join(","));
+  if (params.latitude != null && !Number.isNaN(params.latitude)) q.set("latitude", String(params.latitude));
+  if (params.longitude != null && !Number.isNaN(params.longitude)) q.set("longitude", String(params.longitude));
+  if (params.radius != null && !Number.isNaN(params.radius) && params.radius > 0) q.set("radius", String(params.radius));
+  if (params.countryCode) q.set("countryCode", params.countryCode);
+  if (params.placeType) q.set("placeType", params.placeType);
+  if (params.centerLat != null && !Number.isNaN(params.centerLat)) q.set("centerLat", String(params.centerLat));
+  if (params.centerLng != null && !Number.isNaN(params.centerLng)) q.set("centerLng", String(params.centerLng));
+  if (params.searchRadius != null && !Number.isNaN(params.searchRadius) && params.searchRadius > 0) q.set("searchRadius", String(params.searchRadius));
 
   return q;
 }
@@ -171,7 +214,14 @@ export function backgroundSearchParamsSignature(params: ResultsQueryParams): str
     aiSearch: params.aiSearch ?? "",
     checkin: params.checkin,
     checkout: params.checkout,
-    occupancies: params.occupancies
+    occupancies: params.occupancies,
+    latitude: params.latitude ?? "",
+    longitude: params.longitude ?? "",
+    radius: params.radius ?? "",
+    centerLat: params.centerLat ?? "",
+    centerLng: params.centerLng ?? "",
+    searchRadius: params.searchRadius ?? "",
+    countryCode: params.countryCode ?? ""
   });
 }
 
@@ -202,6 +252,15 @@ export function buildResultsQueryParams(options: {
   minRating?: number;
   minReviewsCount?: number;
   facilities?: number[];
+  latitude?: number;
+  longitude?: number;
+  radius?: number;
+  /** Phase 7: geographic center and radius for distance sorting; country/type for LITEAPI */
+  centerLat?: number;
+  centerLng?: number;
+  searchRadius?: number;
+  placeType?: NormalizedPlaceType;
+  countryCode?: string;
 }): ResultsQueryParams {
   const occupanciesStr = serializeOccupancies(options.occupancies);
   const placeTypes = options.placeTypes ?? [];
@@ -224,6 +283,14 @@ export function buildResultsQueryParams(options: {
     stars: options.stars,
     minRating: options.minRating,
     minReviewsCount: options.minReviewsCount,
-    facilities: options.facilities
+    facilities: options.facilities,
+    latitude: options.latitude,
+    longitude: options.longitude,
+    radius: options.radius,
+    centerLat: options.centerLat,
+    centerLng: options.centerLng,
+    searchRadius: options.searchRadius,
+    placeType: options.placeType,
+    countryCode: options.countryCode
   };
 }

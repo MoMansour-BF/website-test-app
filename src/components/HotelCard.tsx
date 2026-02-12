@@ -1,6 +1,7 @@
 "use client";
 
-import { HeartIcon, HeartIconFilled } from "@/components/Icons";
+import { HeartIcon, HeartIconFilled, MapPinIcon } from "@/components/Icons";
+import { formatDistance } from "@/lib/distance-utils";
 import Link from "next/link";
 
 export interface HotelCardHotel {
@@ -31,6 +32,8 @@ interface HotelCardProps {
   href: string;
   isFavorite: boolean;
   onToggleFavorite: (e: React.MouseEvent) => void;
+  /** Distance from search center in meters (optional) */
+  distance?: number;
 }
 
 export function HotelCard({
@@ -42,6 +45,7 @@ export function HotelCard({
   href,
   isFavorite,
   onToggleFavorite,
+  distance,
 }: HotelCardProps) {
   return (
     <Link
@@ -100,6 +104,12 @@ export function HotelCard({
           <p className="text-xs text-[var(--muted-foreground)] line-clamp-1">
             {hotel.address}
           </p>
+        )}
+        {distance != null && (
+          <div className="flex items-center gap-1 text-xs text-[var(--muted-foreground)]">
+            <MapPinIcon className="w-3 h-3" />
+            <span>{formatDistance(distance)} from center</span>
+          </div>
         )}
         {/* Phase 4: always show reviews line; use "—" / "No reviews" when rating/reviewCount absent */}
         <p className="mt-1 inline-flex flex-wrap items-center gap-1.5 text-xs">
