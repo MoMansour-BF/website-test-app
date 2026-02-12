@@ -344,7 +344,7 @@ function ResultsContent() {
       nationality: nationalityParam,
       sort: sortOrder,
       countryCode: hasPlace ? (selectedCountryCode ?? countryCodeParam) : undefined,
-      placeType: hasPlace ? (selectedPlaceType ?? queryParams.placeType) : undefined,
+      placeType: hasPlace ? (selectedPlaceType ?? queryParams.placeType) as NormalizedPlaceType | undefined : undefined,
     });
     const locationKey = hasPlace ? selectedPlaceId ?? "" : (globalSearchQuery?.trim() ?? "");
     const trigger =
@@ -937,7 +937,7 @@ function ResultsContent() {
       stars: queryParams.stars,
       minRating: queryParams.minRating,
       countryCode: hasPlace ? (selectedCountryCode ?? queryParams.countryCode) : undefined,
-      placeType: hasPlace ? (selectedPlaceType ?? queryParams.placeType) : undefined,
+      placeType: hasPlace ? (selectedPlaceType ?? queryParams.placeType) as NormalizedPlaceType | undefined : undefined,
     });
     const preloaded = backgroundSearch.getResultForParams(params);
     if (preloaded != null && typeof preloaded === "object") {
